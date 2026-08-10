@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use tree_sitter::Node;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -680,14 +682,25 @@ impl RarityScorer {
     }
 
     pub fn score_api_call(&self, api: &ApiCallFingerprint) -> f64 {
-        let key = format!("{:?}::{}", api.object, api.method);
-        match self.api_counts.get(&key) {
-            Some(1..=3) => 0.8,
-            Some(4..=10) => 0.5,
-            Some(_) => 0.2,
-            None => 0.0,
-        }
+        // Called tens of millions of times in the full-similarity phase, so the lookup key is
+        // built into a reused thread-local buffer instead of a fresh String per call. The
+        // `write!` uses the same format string as `add_fingerprint`, so the key is identical.
+        API_KEY_BUF.with(|buf| {
+            let mut key = buf.borrow_mut();
+            key.clear();
+            let _ = write!(key, "{:?}::{}", api.object, api.method);
+            match self.api_counts.get(key.as_str()) {
+                Some(1..=3) => 0.8,
+                Some(4..=10) => 0.5,
+                Some(_) => 0.2,
+                None => 0.0,
+            }
+        })
     }
+}
+
+thread_local! {
+    static API_KEY_BUF: RefCell<String> = RefCell::new(String::new());
 }
 
 pub fn calculate_fingerprint_similarity(
@@ -697,46 +710,62 @@ pub fn calculate_fingerprint_similarity(
 ) -> (f64, usize) {
     let mut total_score = 0.0;
     let mut evidence_count = 0;
-    let mut matched_strings = HashSet::new();
-
-    // Match strings (highest weight)
-    for s1 in &fp1.strings {
-        for s2 in &fp2.strings {
-            if s1.value == s2.value && !matched_strings.contains(&s1.value) {
-                matched_strings.insert(s1.value.clone());
-                let rarity = scorer.score_string(&s1.value);
-                let context_weight = match s1.context {
-                    StringContext::ErrorMessage => 1.2,
-                    StringContext::FilePath => 1.1,
-                    StringContext::CommandName => 1.0,
-                    StringContext::ConfigKey => 0.9,
-                    StringContext::ApiEndpoint => 1.0,
-                    StringContext::Regular => 0.7,
-                };
-                total_score += rarity * context_weight;
-                evidence_count += 1;
-            }
+    // Match strings (highest weight).
+    //
+    // The original form carried a `HashSet<String>` of already-scored values, cloning a String
+    // per match. That set can only ever suppress a later fp1 entry whose value was already
+    // scored, and a value is scored exactly when it also occurs in fp2. So "already in the set"
+    // is equivalent to "an earlier fp1 entry has the same value", which needs no allocation.
+    // The dedup check runs after the fp2 lookup because it only matters for entries that match.
+    for (i, s1) in fp1.strings.iter().enumerate() {
+        if !fp2.strings.iter().any(|s2| s2.value == s1.value) {
+            continue;
         }
+
+        if fp1.strings[..i].iter().any(|prev| prev.value == s1.value) {
+            continue;
+        }
+
+        let rarity = scorer.score_string(&s1.value);
+        let context_weight = match s1.context {
+            StringContext::ErrorMessage => 1.2,
+            StringContext::FilePath => 1.1,
+            StringContext::CommandName => 1.0,
+            StringContext::ConfigKey => 0.9,
+            StringContext::ApiEndpoint => 1.0,
+            StringContext::Regular => 0.7,
+        };
+
+        total_score += rarity * context_weight;
+        evidence_count += 1;
     }
 
-    // Match constants
-    let mut matched_constants = HashSet::new();
-    for c1 in &fp1.constants {
-        for c2 in &fp2.constants {
-            if c1.value == c2.value && !matched_constants.contains(&c1.value) {
-                matched_constants.insert(c1.value.clone());
-                let rarity = scorer.score_constant(&c1.value);
-                total_score += rarity * 0.8;
-                evidence_count += 1;
-            }
+    // Match constants (same dedup reasoning as strings)
+    for (i, c1) in fp1.constants.iter().enumerate() {
+        if !fp2.constants.iter().any(|c2| c2.value == c1.value) {
+            continue;
         }
+
+        if fp1.constants[..i].iter().any(|prev| prev.value == c1.value) {
+            continue;
+        }
+
+        let rarity = scorer.score_constant(&c1.value);
+
+        total_score += rarity * 0.8;
+        evidence_count += 1;
     }
 
-    // Match API calls
+    // Match API calls. Deliberately no dedup: duplicate (object, method) keys contribute once
+    // per (api1, api2) pair, each with its own arg_bonus. The rarity depends only on api1, so it
+    // is computed at most once per api1 and reused for every api2 it matches; the added terms and
+    // their order are unchanged.
     for api1 in &fp1.api_calls {
+        let mut cached_rarity: Option<f64> = None;
+
         for api2 in &fp2.api_calls {
             if api1.object == api2.object && api1.method == api2.method {
-                let rarity = scorer.score_api_call(api1);
+                let rarity = *cached_rarity.get_or_insert_with(|| scorer.score_api_call(api1));
                 // Bonus if first argument also matches
                 let arg_bonus = if api1.first_arg == api2.first_arg && api1.first_arg.is_some() {
                     0.3
