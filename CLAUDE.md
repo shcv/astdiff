@@ -30,7 +30,7 @@ astdiff is an AST-based structural diff tool for JavaScript that matches renamed
 - `mod.rs` - Main `StructuralDiff` struct, declaration extraction, similarity calculation
 - `parallel_matching_v2.rs` - Primary parallel matching algorithm using MinHash signatures
 - `fingerprint.rs` - Semantic fingerprints (strings, constants, API calls) for better matching
-- `matching_report.rs` - Detailed match evidence reports
+- `matching_report.rs` - Match-evidence data structures used by scoring
 - `profiling.rs` - Performance timing (enabled via `ASTDIFF_PROFILE=1`)
 
 ### Key Data Structures
@@ -45,7 +45,7 @@ Serializable analysis results for faster re-runs. Uses bincode + zstd compressio
 
 ### CLI (src/cli/)
 
-clap-based CLI with subcommands: diff (default), canonicalize, inspect, query, load.
+clap-based CLI with subcommands: diff (default), canon, inspect, query, load.
 
 ## Environment Variables
 

@@ -6,64 +6,45 @@ use std::path::PathBuf;
 pub struct Args {
     #[clap(subcommand)]
     pub command: Option<Command>,
-    
+
     // Default diff mode arguments (when no subcommand is used)
     /// First JavaScript file to compare
     pub file1: Option<PathBuf>,
-    
+
     /// Second JavaScript file to compare
     pub file2: Option<PathBuf>,
-    
-    /// Mapping file for first file
-    #[clap(long)]
-    pub map1: Option<PathBuf>,
-    
-    /// Mapping file for second file
-    #[clap(long)]
-    pub map2: Option<PathBuf>,
-    
-    /// Output format: unified (default), side-by-side, or json
-    #[clap(long, default_value = "unified")]
+
+    /// Output format: unified (default) or json
+    #[clap(long, default_value = "unified", value_parser = ["unified", "json"])]
     pub format: String,
-    
+
     /// Export rename mappings to a file
     #[clap(long)]
     pub export_mappings: Option<PathBuf>,
-    
+
     /// Show only summary of changes (no detailed diffs)
     #[clap(long)]
     pub summary: bool,
-    
-    
+
     /// Show detailed analysis to stderr
     #[clap(long)]
     pub verbose: bool,
-    
+
     /// Enable fingerprint-based matching (disabled by default due to accuracy issues)
     #[clap(long)]
     pub fingerprints: bool,
-    
-    /// Generate a detailed matching report
-    #[clap(long)]
-    pub report: bool,
-    
-    /// Path to save the matching report (implies --report)
-    #[clap(long, value_name = "PATH")]
-    pub report_path: Option<PathBuf>,
-    
+
     /// Compact output showing only function names and line ranges
     #[clap(long)]
     pub compact: bool,
-    
+
     /// Alias for --compact
     #[clap(long)]
     pub lite: bool,
-    
-    
-    /// Dump extracted declarations to a file for faster processing
+
+    /// Save declarations, matches, and results for later inspection
     #[clap(long, value_name = "FILE")]
     pub dump: Option<PathBuf>,
-    
 }
 
 #[derive(Subcommand, Debug)]
@@ -72,47 +53,47 @@ pub enum Command {
     Canon {
         /// Input JavaScript file
         input_file: PathBuf,
-        
+
         /// Generate mapping template (no file) or apply mappings (with file)
         #[clap(long, value_name = "FILE")]
         map: Option<Option<PathBuf>>,
-        
+
         /// Keep comments in output
         #[clap(long)]
         preserve_comments: bool,
-        
+
         /// Pretty print the output with proper indentation
         #[clap(long)]
         pretty: bool,
     },
-    
+
     /// Inspect a specific declaration in a file
     Inspect {
         /// Input JavaScript file
         input_file: PathBuf,
-        
+
         /// Optional second file to compare against
         #[clap(long)]
         compare_file: Option<PathBuf>,
-        
+
         /// Name of the declaration to inspect (e.g., function name, variable name)
         identifier: String,
     },
-    
+
     /// Query information from a comprehensive dump file
     Query {
         /// Path to the dump file (.astdump)
         dump_file: PathBuf,
-        
+
         #[clap(subcommand)]
         query_type: QueryType,
     },
-    
+
     /// Load and display a comprehensive dump file
     Load {
         /// Path to the dump file (.astdump)
         dump_file: PathBuf,
-        
+
         /// Output format: summary (default), full, or json
         #[clap(long, default_value = "summary")]
         format: String,
@@ -126,24 +107,24 @@ pub enum QueryType {
         /// Name of the declaration to find
         name: String,
     },
-    
+
     /// Show all unmatched declarations from file1
     UnmatchedFrom1,
-    
+
     /// Show all unmatched declarations from file2
     UnmatchedFrom2,
-    
+
     /// Get match information for a declaration
     Match {
         /// Name of the declaration to find match for
         name: String,
     },
-    
+
     /// Validate the dump against source files
     Validate {
         /// Path to the first source file
         file1: PathBuf,
-        
+
         /// Path to the second source file  
         file2: PathBuf,
     },
@@ -152,32 +133,42 @@ pub enum QueryType {
 impl Args {
     pub fn mode(&self) -> Mode {
         match &self.command {
-            Some(Command::Canon { input_file, map, preserve_comments, pretty }) => {
-                match map {
-                    None => Mode::Canonicalize {
-                        input_file: input_file.clone(),
-                        preserve_comments: *preserve_comments,
-                        pretty: *pretty,
-                    },
-                    Some(None) => Mode::GenerateMapping {
-                        input_file: input_file.clone(),
-                        preserve_comments: *preserve_comments,
-                        pretty: *pretty,
-                    },
-                    Some(Some(path)) => Mode::ApplyMapping {
-                        input_file: input_file.clone(),
-                        map_file: path.clone(),
-                        preserve_comments: *preserve_comments,
-                        pretty: *pretty,
-                    },
-                }
+            Some(Command::Canon {
+                input_file,
+                map,
+                preserve_comments,
+                pretty,
+            }) => match map {
+                None => Mode::Canonicalize {
+                    input_file: input_file.clone(),
+                    preserve_comments: *preserve_comments,
+                    pretty: *pretty,
+                },
+                Some(None) => Mode::GenerateMapping {
+                    input_file: input_file.clone(),
+                    preserve_comments: *preserve_comments,
+                    pretty: *pretty,
+                },
+                Some(Some(path)) => Mode::ApplyMapping {
+                    input_file: input_file.clone(),
+                    map_file: path.clone(),
+                    preserve_comments: *preserve_comments,
+                    pretty: *pretty,
+                },
             },
-            Some(Command::Inspect { input_file, compare_file, identifier }) => Mode::Inspect {
+            Some(Command::Inspect {
+                input_file,
+                compare_file,
+                identifier,
+            }) => Mode::Inspect {
                 input_file: input_file.clone(),
                 compare_file: compare_file.clone(),
                 identifier: identifier.clone(),
             },
-            Some(Command::Query { dump_file, query_type }) => Mode::Query {
+            Some(Command::Query {
+                dump_file,
+                query_type,
+            }) => Mode::Query {
                 dump_file: dump_file.clone(),
                 query_type: query_type.clone(),
             },
@@ -191,15 +182,11 @@ impl Args {
                     (Some(file1), Some(file2)) => Mode::Diff {
                         file1: file1.clone(),
                         file2: file2.clone(),
-                        map1: self.map1.clone(),
-                        map2: self.map2.clone(),
                         format: self.format.clone(),
                         export_mappings: self.export_mappings.clone(),
                         summary: self.summary,
                         verbose: self.verbose,
                         fingerprints: self.fingerprints,
-                        report: self.report || self.report_path.is_some(),
-                        report_path: self.report_path.clone(),
                         compact: self.compact,
                         lite: self.lite,
                         dump: self.dump.clone(),
@@ -210,8 +197,12 @@ impl Args {
                         eprintln!("  astdiff FILE1 FILE2                    # Compare two JavaScript files");
                         eprintln!("  astdiff FILE1 FILE2 --summary          # Show only summary of changes");
                         eprintln!("  astdiff FILE1 FILE2 --compact          # Show compact location summary");
-                        eprintln!("  astdiff canon INPUT_FILE               # Canonicalize JavaScript");
-                        eprintln!("  astdiff canon INPUT_FILE --map         # Generate mapping template");
+                        eprintln!(
+                            "  astdiff canon INPUT_FILE               # Canonicalize JavaScript"
+                        );
+                        eprintln!(
+                            "  astdiff canon INPUT_FILE --map         # Generate mapping template"
+                        );
                         eprintln!("  astdiff canon INPUT_FILE --map MAP.yaml # Apply mappings");
                         eprintln!("\nFor more information, run: astdiff --help");
                         std::process::exit(1);
@@ -220,7 +211,6 @@ impl Args {
             }
         }
     }
-    
 }
 
 #[derive(Debug)]
@@ -248,15 +238,11 @@ pub enum Mode {
     Diff {
         file1: PathBuf,
         file2: PathBuf,
-        map1: Option<PathBuf>,
-        map2: Option<PathBuf>,
         format: String,
         export_mappings: Option<PathBuf>,
         summary: bool,
         verbose: bool,
         fingerprints: bool,
-        report: bool,
-        report_path: Option<PathBuf>,
         compact: bool,
         lite: bool,
         dump: Option<PathBuf>,
@@ -273,8 +259,5 @@ pub enum Mode {
         query_type: QueryType,
     },
     /// Load and display a dump file
-    Load {
-        dump_file: PathBuf,
-        format: String,
-    },
+    Load { dump_file: PathBuf, format: String },
 }

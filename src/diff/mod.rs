@@ -14,11 +14,7 @@ use matching_report::*;
 
 /// Represents a structural diff between two JavaScript ASTs
 pub struct StructuralDiff {
-    mappings1: Option<HashMap<String, String>>,
-    mappings2: Option<HashMap<String, String>>,
     use_fingerprints: bool,
-    generate_report: bool,
-    report_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +159,8 @@ pub struct DiffResult {
     /// Rename map: new_name → old_name (file2 → file1) for normalizing source2 references
     #[serde(skip)]
     pub rename_map: HashMap<String, String>,
+    #[serde(skip)]
+    pub matched_pairs: Vec<(usize, usize, f64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,13 +171,11 @@ pub struct Change {
     pub description: String,
     pub structural_path: String,
     /// Classification derived from normalized diff (None for Add/Delete)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub classification: Option<DiffClassification>,
     /// The display diff (original text, normalized comparison). Empty if Unchanged.
     #[serde(skip)]
     pub display_diff: String,
     /// Similarity score for matched pairs
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub similarity_score: Option<f64>,
 }
 
@@ -223,11 +219,7 @@ pub fn extract_source_bytes(source: &str, start_byte: usize, end_byte: usize) ->
 impl StructuralDiff {
     pub fn new() -> Self {
         Self {
-            mappings1: None,
-            mappings2: None,
             use_fingerprints: true, // Default to true for better accuracy
-            generate_report: false,
-            report_path: None,
         }
     }
 
@@ -241,15 +233,6 @@ impl StructuralDiff {
 
     pub fn set_use_fingerprints(&mut self, use_fingerprints: bool) {
         self.use_fingerprints = use_fingerprints;
-    }
-
-    pub fn set_generate_report(&mut self, generate_report: bool) {
-        self.generate_report = generate_report;
-    }
-
-    pub fn set_report_path(&mut self, path: std::path::PathBuf) {
-        self.report_path = Some(path.to_string_lossy().to_string());
-        self.generate_report = true; // Automatically enable report if path is set
     }
 
     /// Format string diff for display, highlighting important changes
@@ -282,14 +265,6 @@ impl StructuralDiff {
             declarations_removed,
             declarations_added + declarations_removed + declarations_modified,
         )
-    }
-
-    pub fn set_mappings1(&mut self, mappings: HashMap<String, String>) {
-        self.mappings1 = Some(mappings);
-    }
-
-    pub fn set_mappings2(&mut self, mappings: HashMap<String, String>) {
-        self.mappings2 = Some(mappings);
     }
 
     pub fn compare(
@@ -342,21 +317,6 @@ impl StructuralDiff {
             let decls2: Vec<SerializableDeclaration> =
                 decls2_clone.iter().map(|d| d.into()).collect();
 
-            // Reconstruct match data from changes
-            let matches: Vec<(usize, usize, f64)> = result
-                .changes
-                .iter()
-                .filter(|c| matches!(c.change_type, ChangeType::Modification))
-                .filter_map(|c| {
-                    let loc1 = c.location1.as_ref()?;
-                    let loc2 = c.location2.as_ref()?;
-                    let idx1 = decls1_clone.iter().position(|d| d.line == loc1.line)?;
-                    let idx2 = decls2_clone.iter().position(|d| d.line == loc2.line)?;
-                    let sim = c.similarity_score.unwrap_or(0.0);
-                    Some((idx1, idx2, sim))
-                })
-                .collect();
-
             let config = DiffConfig {
                 use_fingerprints: self.use_fingerprints,
                 parallel_matching: true,
@@ -368,7 +328,7 @@ impl StructuralDiff {
                 file2_path.to_path_buf(),
                 decls1,
                 decls2,
-                matches,
+                result.matched_pairs.clone(),
                 result.clone(),
                 config,
             )?;
@@ -418,6 +378,7 @@ impl StructuralDiff {
             total_declarations1,
             total_declarations2,
             rename_map,
+            matched_pairs: matches,
         })
     }
 
@@ -1312,24 +1273,13 @@ impl StructuralDiff {
     }
 
     pub fn generate_rename_mapping(&self, result: &DiffResult) -> HashMap<String, String> {
-        let mut mappings = HashMap::new();
-
-        for change in &result.changes {
-            if let ChangeType::Modification = change.change_type {
-                if change.description.contains("matched with") {
-                    // Extract the rename relationship from the structural_path
-                    if let Some((from, to)) = change
-                        .structural_path
-                        .strip_prefix("global.")
-                        .and_then(|s| s.split_once("->"))
-                    {
-                        mappings.insert(from.to_string(), to.to_string());
-                    }
-                }
-            }
-        }
-
-        mappings
+        // DiffResult stores new -> old so source2 can be normalized to source1.
+        // Export the human-facing evolution direction, old -> new.
+        result
+            .rename_map
+            .iter()
+            .map(|(new_name, old_name)| (old_name.clone(), new_name.clone()))
+            .collect()
     }
 
     pub fn match_declarations(
@@ -1338,7 +1288,11 @@ impl StructuralDiff {
         decls2: &[Declaration],
         source1: &str,
         source2: &str,
-    ) -> (Vec<(usize, usize)>, Vec<Change>, HashMap<String, String>) {
+    ) -> (
+        Vec<(usize, usize, f64)>,
+        Vec<Change>,
+        HashMap<String, String>,
+    ) {
         use parallel_matching_v2::ParallelMatcherV2;
         use profiling::Timer;
 

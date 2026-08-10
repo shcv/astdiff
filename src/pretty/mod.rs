@@ -8,13 +8,13 @@ impl PrettyPrinter {
     pub fn new() -> Self {
         Self { indent_size: 2 }
     }
-    
+
     pub fn format(&self, tree: &Tree, source: &str) -> String {
         let mut output = String::new();
         self.format_node(tree.root_node(), source, 0, &mut output);
         output
     }
-    
+
     fn format_node(&self, node: Node, source: &str, depth: usize, output: &mut String) {
         match node.kind() {
             "program" => {
@@ -31,17 +31,17 @@ impl PrettyPrinter {
             "function_declaration" => {
                 self.add_indent(output, depth);
                 output.push_str("function ");
-                
+
                 if let Some(name) = node.child_by_field_name("name") {
                     output.push_str(&source[name.byte_range()]);
                 }
-                
+
                 if let Some(params) = node.child_by_field_name("parameters") {
                     self.format_node(params, source, depth, output);
                 }
-                
+
                 output.push_str(" ");
-                
+
                 if let Some(body) = node.child_by_field_name("body") {
                     self.format_node(body, source, depth, output);
                 }
@@ -77,19 +77,22 @@ impl PrettyPrinter {
             }
             "variable_declaration" => {
                 self.add_indent(output, depth);
-                
+
                 // Get declaration type (var, let, const)
                 if let Some(first_child) = node.child(0) {
                     output.push_str(first_child.kind());
                     output.push(' ');
                 }
-                
+
                 // Format declarators
                 for i in 0..node.child_count() {
                     if let Some(child) = node.child(i) {
                         if child.kind() == "variable_declarator" {
                             self.format_node(child, source, depth, output);
-                            if i < node.child_count() - 1 && node.child(i + 1).map(|n| n.kind()) == Some("variable_declarator") {
+                            if i < node.child_count() - 1
+                                && node.child(i + 1).map(|n| n.kind())
+                                    == Some("variable_declarator")
+                            {
                                 output.push_str(", ");
                             }
                         }
@@ -143,7 +146,7 @@ impl PrettyPrinter {
             }
         }
     }
-    
+
     fn add_indent(&self, output: &mut String, depth: usize) {
         for _ in 0..(depth * self.indent_size) {
             output.push(' ');
@@ -155,17 +158,17 @@ impl PrettyPrinter {
 mod tests {
     use super::*;
     use crate::parser::JsParser;
-    
+
     #[test]
     fn test_pretty_print() {
         let source = "function add(a,b){var result=a+b;return result;}";
-        
+
         let mut parser = JsParser::new().unwrap();
         let tree = parser.parse(source).unwrap();
-        
+
         let printer = PrettyPrinter::new();
         let formatted = printer.format(&tree, source);
-        
+
         assert!(formatted.contains("function add(a, b) {"));
         assert!(formatted.contains("  var result = a + b;"));
         assert!(formatted.contains("  return result;"));

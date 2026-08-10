@@ -56,7 +56,11 @@ impl ParallelMatcherV2 {
                 &RarityScorer,
             ) -> EvidenceBreakdown
             + Sync,
-    ) -> (Vec<(usize, usize)>, Vec<Change>, HashMap<String, String>) {
+    ) -> (
+        Vec<(usize, usize, f64)>,
+        Vec<Change>,
+        HashMap<String, String>,
+    ) {
         use super::profiling::Timer;
 
         // Step 1: Build all potential pairs with size filtering
@@ -337,7 +341,11 @@ impl ParallelMatcherV2 {
         decls2: &[DeclarationData],
         source1: &str,
         source2: &str,
-    ) -> (Vec<(usize, usize)>, Vec<Change>, HashMap<String, String>) {
+    ) -> (
+        Vec<(usize, usize, f64)>,
+        Vec<Change>,
+        HashMap<String, String>,
+    ) {
         use super::profiling::Timer;
         use super::StructuralDiff;
 
@@ -363,7 +371,7 @@ impl ParallelMatcherV2 {
             if !matched1[result.i1] && !matched2[result.i2] {
                 matched1[result.i1] = true;
                 matched2[result.i2] = true;
-                matches.push((result.i1, result.i2));
+                matches.push((result.i1, result.i2, result.similarity));
                 match_data.push((result.i1, result.i2, result.similarity));
 
                 let decl1 = &decls1[result.i1];

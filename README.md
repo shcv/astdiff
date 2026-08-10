@@ -11,9 +11,9 @@ A high-performance AST-based structural diff tool for JavaScript that intelligen
 - **Intelligent Matching**: Uses MinHash signatures and structural fingerprinting to match renamed functions
 - **Minified Code Support**: Designed to work with heavily minified/obfuscated JavaScript
 - **Fast Performance**: Parallel processing and optimized algorithms handle large files efficiently
-- **Multiple Output Formats**: Summary, detailed, compact, side-by-side, and JSON outputs
-- **Source Map Support**: Can utilize source maps to show original names when available
-- **Comprehensive Dumps**: Save and reload analysis results for faster repeated comparisons
+- **Multiple Output Formats**: Detailed unified, summary, compact, and JSON outputs
+- **Rename Exports**: Save detected old-to-new declaration names as YAML
+- **Validated Dumps**: Save and inspect versioned analysis results with integrity checks
 
 ## Installation
 
@@ -40,20 +40,17 @@ astdiff file1.js file2.js
 
 ### Output Formats
 
-Choose different output styles with `--format`:
+Choose the amount and representation of output:
 
 ```bash
-# Summary view (default)
+# Detailed unified view (default)
 astdiff old.js new.js
 
-# Detailed view with full function bodies
-astdiff old.js new.js --format detailed
+# Summary without declaration bodies
+astdiff old.js new.js --summary
 
-# Compact view (just locations)
-astdiff old.js new.js --format compact
-
-# Side-by-side comparison
-astdiff old.js new.js --format side-by-side
+# Compact location summary
+astdiff old.js new.js --compact
 
 # JSON output for programmatic use
 astdiff old.js new.js --format json
@@ -62,22 +59,20 @@ astdiff old.js new.js --format json
 ### Advanced Options
 
 ```bash
-# Use source maps for better names
-astdiff old.js new.js --map1 old.js.map --map2 new.js.map
-
 # Show renamed functions (hidden by default)
 ASTDIFF_SHOW_RENAMES=1 astdiff old.js new.js
 
-# Save analysis for faster re-runs
-astdiff old.js new.js --dump analysis.astdump
+# Export detected declaration renames (old name -> new name)
+astdiff old.js new.js --export-mappings renames.yaml
 
-# Generate detailed matching report
-astdiff old.js new.js --report-path report.html
+# Save analysis for later load/query inspection
+astdiff old.js new.js --dump analysis.astdump
 ```
 
 ### Working with Dumps
 
-Save analysis results for faster repeated comparisons:
+Save and inspect analysis results. Dumps are not accepted as inputs to a new
+comparison; they are archival/query artifacts.
 
 ```bash
 # Create a comprehensive dump
@@ -85,8 +80,9 @@ astdiff v1.js v2.js --dump comparison.astdump
 
 # Query the dump
 astdiff query comparison.astdump find functionName
-astdiff query comparison.astdump summary
-astdiff query comparison.astdump validate
+astdiff query comparison.astdump match functionName
+astdiff query comparison.astdump unmatched-from1
+astdiff query comparison.astdump validate v1.js v2.js
 
 # Load and display the dump
 astdiff load comparison.astdump
@@ -96,14 +92,18 @@ astdiff load comparison.astdump
 
 ```bash
 # Canonicalize JavaScript (normalize variable names)
-astdiff canonicalize input.js
+astdiff canon input.js
+
+# Generate an editable canonical-name mapping
+astdiff canon input.js --map
+
+# Apply an edited canonical-name mapping
+astdiff canon input.js --map mapping.txt
 
 # Inspect a specific declaration
 astdiff inspect file.js functionName
 astdiff inspect file.js functionName --compare-file other.js
 
-# Apply source map to canonicalized code
-astdiff apply-mapping canonical.js mapping.json
 ```
 
 ## How It Works
@@ -119,7 +119,6 @@ astdiff apply-mapping canonical.js mapping.json
 ## Performance
 
 Optimized for large minified files:
-- Processes files with 7,500+ declarations in ~20 seconds
 - Parallel extraction and matching algorithms
 - Efficient u64-based structural hashing
 - MinHash filtering reduces comparison complexity from O(n²) to manageable levels
@@ -153,7 +152,7 @@ Requirements:
 - C++ compiler (for tree-sitter)
 
 ```bash
-git clone https://github.com/yourusername/astdiff
+git clone https://github.com/shcv/astdiff
 cd astdiff
 cargo build --release
 ```

@@ -6,21 +6,22 @@ fn print_tree(node: Node, source: &str, indent: usize) {
     } else {
         String::new()
     };
-    
-    println!("{}{} [{}:{}]{}",
+
+    println!(
+        "{}{} [{}:{}]{}",
         " ".repeat(indent),
         node.kind(),
         node.start_position().row,
         node.start_position().column,
         node_text
     );
-    
+
     // Check for field names
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
-            
+
             // Find field name for this child
             let mut field_name = None;
             for i in 0..node.child_count() {
@@ -31,7 +32,7 @@ fn print_tree(node: Node, source: &str, indent: usize) {
                     }
                 }
             }
-            
+
             if let Some(field) = field_name {
                 println!("{}[{}=", " ".repeat(indent + 2), field);
                 print_tree(child, source, indent + 4);
@@ -39,11 +40,14 @@ fn print_tree(node: Node, source: &str, indent: usize) {
             } else {
                 // Also check if this child has field names for its children
                 if node.kind() == "namespace_import" && child.kind() == "identifier" {
-                    println!("{}NOTE: identifier in namespace_import", " ".repeat(indent + 2));
+                    println!(
+                        "{}NOTE: identifier in namespace_import",
+                        " ".repeat(indent + 2)
+                    );
                 }
                 print_tree(child, source, indent + 2);
             }
-            
+
             if !cursor.goto_next_sibling() {
                 break;
             }
@@ -57,8 +61,10 @@ fn main() {
     println!("---");
 
     let mut parser = Parser::new();
-    parser.set_language(tree_sitter_javascript::language()).unwrap();
-    
+    parser
+        .set_language(tree_sitter_javascript::language())
+        .unwrap();
+
     let tree = parser.parse(source, None).unwrap();
     print_tree(tree.root_node(), source, 0);
 }

@@ -54,7 +54,6 @@ struct DumpHeader {
     magic: [u8; 4], // b"ASTD"
     version: u32,
     flags: DumpFlags,
-    checksum: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -117,27 +116,25 @@ enum MatchReason {
 ```
 [Header - 64 bytes fixed]
   - Magic: 4 bytes ("ASTD")
-  - Version: 4 bytes
-  - Flags: 8 bytes
-  - Checksum: 8 bytes
+  - Version: 4 bytes (little endian; current version 2)
+  - Flags: 8 bytes (bit 0 means zstd)
   - Uncompressed size: 8 bytes
-  - Reserved: 32 bytes
-
-[Metadata - variable length]
-  - Length prefix: 4 bytes
-  - Metadata content
+  - Compressed size: 8 bytes
+  - SHA-256 of compressed payload: 32 bytes
 
 [Compressed Data Block - rest of file]
-  - zstd compressed bincode serialization
+  - zstd-compressed, bounded bincode serialization of AstDiffDump
 ```
 
 #### 3.2 Compression Approach
 - Use zstd level 3-6 (good balance of speed/ratio)
 - Compress after bincode serialization
-- Include uncompressed size in header for allocation
+- Verify magic, version, flags, file length, and SHA-256 before decompression
+- Bound compressed and uncompressed payloads before allocation
+- Reject legacy headerless v1 files rather than attempting ambiguous decoding
 
 #### 3.3 Memory-mapped Option
-For large dumps, support memory mapping:
+Memory mapping is deferred to the Isoform persistence roadmap:
 - Index section at known offsets
 - Allow partial loading of specific sections
 - Lazy decompression of accessed blocks
@@ -179,21 +176,17 @@ astdiff file1.js file2.js --dump analysis.astdump
 # Load and inspect specific declaration
 astdiff inspect analysis.astdump --identifier _C8
 
-# Re-run analysis with different threshold
-astdiff reanalyze analysis.astdump --threshold 0.8
-
-# Export to different format
-astdiff export analysis.astdump --format json > analysis.json
-
 # Query specific information
-astdiff query analysis.astdump --unmatched-from file1
-astdiff query analysis.astdump --why-not-matched func1 func2
+astdiff query analysis.astdump find func1
+astdiff query analysis.astdump match func1
+astdiff query analysis.astdump unmatched-from1
+astdiff query analysis.astdump unmatched-from2
 
 # Validate dump is still valid for source files
-astdiff validate analysis.astdump --file1 current1.js --file2 current2.js
+astdiff query analysis.astdump validate current1.js current2.js
 
-# Generate detailed report from dump
-astdiff report analysis.astdump --output report.html
+# Display summary/full/JSON views
+astdiff load analysis.astdump --format summary
 ```
 
 ### 6. Benefits
@@ -206,7 +199,7 @@ astdiff report analysis.astdump --output report.html
 2. **Debugging**:
    - Complete information preserved
    - Can explore why specific matches were/weren't made
-   - Can try different thresholds without re-parsing
+   - Can inspect retained match decisions and results without re-parsing
 
 3. **Workflows**:
    - Batch analysis across many versions
@@ -220,10 +213,9 @@ astdiff report analysis.astdump --output report.html
 
 ### 7. Implementation Priority
 
-1. **Phase 1**: Basic dump/load of current analysis
-2. **Phase 2**: Add matching decision tracking
-3. **Phase 3**: Query API and reanalysis features
-4. **Phase 4**: Memory mapping and large file optimizations
+1. **Implemented**: validated v2 header, bounded decode, load/query, source validation
+2. **Next**: rejected-candidate evidence and match-decision tracking
+3. **Deferred**: Isoform-positioned mmap cache and lineage artifacts
 
 ## File Extension
 
