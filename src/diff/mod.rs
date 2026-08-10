@@ -601,27 +601,48 @@ impl StructuralDiff {
 
     fn collect_structural_hashes(&self, node: Node, source: &str) -> HashSet<u64> {
         let mut hashes = HashSet::new();
-        self.collect_structural_hashes_recursive(node, source, &mut hashes);
+        let mut scratch = Vec::new();
+        self.collect_structural_hashes_recursive(node, source, &mut hashes, &mut scratch);
         hashes
     }
 
+    /// Hashes `node`, inserts its hash plus every descendant's into `hashes`, and returns it.
+    ///
+    /// A node's hash depends only on its own subtree, so the old separate `compute_structural_hash`
+    /// pass re-walked a subtree the collector was already walking; folding the two into one
+    /// post-order pass visits each node exactly once for the same result.
+    ///
+    /// `scratch` is a shared stack of child hashes: each frame owns the slice from `base` onwards
+    /// and truncates back to it before returning, so the whole traversal shares one allocation
+    /// instead of allocating a `Vec` per internal node.
     fn collect_structural_hashes_recursive(
         &self,
         node: Node,
         source: &str,
         hashes: &mut HashSet<u64>,
-    ) {
-        // Compute hash for this node
-        let hash = self.compute_structural_hash(node, source);
-        hashes.insert(hash);
+        scratch: &mut Vec<u64>,
+    ) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
 
-        // Recursively collect hashes from children
+        let is_literal = self.is_literal(node);
+        let is_identifier = node.kind() == "identifier";
+        let base = scratch.len();
+
+        // Literals and identifiers ignore their children when hashing, but the walk still descends
+        // into them so that descendants (a template_string's substitutions, say) reach the set.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
                 if !matches!(child.kind(), "comment") {
-                    self.collect_structural_hashes_recursive(child, source, hashes);
+                    let child_hash =
+                        self.collect_structural_hashes_recursive(child, source, hashes, scratch);
+                    let contributes = !is_literal
+                        && !is_identifier
+                        && !matches!(child.kind(), ";" | "," | "(" | ")" | "{" | "}" | "[" | "]");
+                    if contributes {
+                        scratch.push(child_hash);
+                    }
                 }
 
                 if !cursor.goto_next_sibling() {
@@ -629,51 +650,33 @@ impl StructuralDiff {
                 }
             }
         }
-    }
-
-    fn compute_structural_hash(&self, node: Node, source: &str) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-
         let mut hasher = DefaultHasher::new();
 
         // Hash node type
         node.kind().hash(&mut hasher);
 
         // For literals, include the value
-        if self.is_literal(node) {
+        if is_literal {
             source[node.byte_range()].hash(&mut hasher);
-        } else if node.kind() == "identifier" {
+        } else if is_identifier {
             // For identifiers, just use a placeholder
             "<ID>".hash(&mut hasher);
         } else {
-            // For other nodes, hash the child structure
-            let mut cursor = node.walk();
-            if cursor.goto_first_child() {
-                let mut child_hashes = Vec::new();
-                loop {
-                    let child = cursor.node();
-                    if !matches!(
-                        child.kind(),
-                        "comment" | ";" | "," | "(" | ")" | "{" | "}" | "[" | "]"
-                    ) {
-                        child_hashes.push(self.compute_structural_hash(child, source));
-                    }
-
-                    if !cursor.goto_next_sibling() {
-                        break;
-                    }
-                }
-                // Sort child hashes for order-independent nodes
-                if self.is_order_independent(node) {
-                    child_hashes.sort();
-                }
-                for hash in child_hashes {
-                    hash.hash(&mut hasher);
-                }
+            // Sort child hashes for order-independent nodes
+            if self.is_order_independent(node) {
+                scratch[base..].sort();
+            }
+            for hash in &scratch[base..] {
+                hash.hash(&mut hasher);
             }
         }
 
-        hasher.finish()
+        scratch.truncate(base);
+
+        let hash = hasher.finish();
+        hashes.insert(hash);
+
+        hash
     }
 
     fn get_function_signature(&self, node: Node, _source: &str) -> String {
