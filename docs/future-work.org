@@ -1,0 +1,306 @@
+#+TITLE: astdiff Future Work: Phases 5--8
+#+OPTIONS: toc:2
+
+* Purpose and status
+
+This document records the deferred roadmap after the current JavaScript
+parser, scope analysis, canonicalization, mapping, matching, and dump
+pipeline.  Phases 5--8 are intentionally off to the side: they are design
+and delivery gates for later work, not a claim that these capabilities are
+implemented today.
+
+The order is significant.  A language-neutral identity and schema contract
+must exist before source locations can be propagated across transforms;
+lineage and deterministic matching evidence must exist before an LLM can
+offer names for review; additional front ends and lower-level instruction
+adapters come last, once the shared representation can carry their
+provenance without making the JavaScript path special.
+
+* Baseline and shared constraints
+
+The current pipeline is JavaScript/tree-sitter based and passes source text
+through scope analysis, canonicalization, mapping generation/application, and
+structural diffing.  It also has prototype compressed-dump and matching-report
+code, but those are not yet reliable persistence or reporting contracts.  The
+roadmap must preserve the working properties below while replacing those
+prototypes with tested formats:
+
+- The no-LLM diff and canonicalization path remains deterministic and
+  complete on its existing fixtures.
+- A symbol's identity is distinct from its spelling, source location, and
+  display name.  Renaming must not change identity.
+- Provenance is explicit.  An unmapped or ambiguous location is represented
+  as such, rather than being guessed or silently dropped.
+- Unknown schema fields, syntax, opcodes, and adapter features fail closed or
+  survive as explicitly unknown data; they are never silently reinterpreted.
+- Every new artifact has a version, producer, input identity, and enough
+  metadata to reproduce or reject stale work.
+- Inputs are treated as data.  Parsing, decoding, and LLM review jobs have
+  bounded resource use and do not execute source or native instructions.
+
+* Dependency map
+
+| Phase | Result | Requires |
+|-------+--------+----------|
+| 5 | Language-neutral IR and Isoform schemas | Existing parser/scope/mapping/diff artifacts and a fixture corpus |
+| 6 | Source Map v3 decoding and symbol-lineage propagation | Phase 5 stable IDs, spans, schema/versioning, and transform boundaries |
+| 7 | Calibrated, reviewable asynchronous naming suggestions | Phases 5--6 identity/provenance plus deterministic match evidence |
+| 8 | TypeScript/JSX and bundle adapters, then Wasm/native instruction IR | Phases 5--6 contracts; Phase 7 is optional for naming display |
+
+Each phase exits only when its acceptance criteria, compatibility checks, and
+fixture evidence are recorded.  A later phase must not introduce a shadow
+identity or incompatible serializer merely to avoid an earlier gate.
+
+* Phase 5: language-neutral IR and Isoform schemas
+
+** Objective
+
+Define one versioned, language-neutral intermediate representation (IR) for
+files, modules, declarations, bindings, references, spans, relations,
+diagnostics, and provenance.  Define the corresponding Isoform schemas and
+canonical wire encoding so that a producer written for JavaScript can be
+consumed by another language without depending on Rust structs or the current
+mapping text format.
+
+** Prerequisites
+
+- A representative, checked-in corpus covering supported JavaScript syntax,
+  minified input, renamed declarations, nested scopes, destructuring,
+  imports/exports, source maps, and malformed-input diagnostics.
+- An inventory of the current `Declaration`, scope, mapping, match-evidence,
+  `DiffResult`, and dump fields, including which fields are observational and
+  which are required for identity.
+- A decision on the initial Isoform schema namespace, versioning policy, and
+  canonical byte representation.  JSON or another host serializer may be a
+  view, but it is not the identity of the artifact.
+- Deterministic hashing and a collision/error policy for stable IDs.  IDs must
+  be derived from semantic identity and provenance, not from traversal order
+  alone.
+
+** Deliverables
+
+- A documented IR model with stable IDs for files/modules, declarations,
+  symbols, references, and spans; explicit scope and relation edges; and
+  structured diagnostics.
+- Isoform schemas for the IR, schema/profile identifiers, canonical encoding,
+  layout or artifact digest, and forward-compatible unknown-field handling.
+- Versioned adapters from the current JavaScript pipeline and dump data into
+  the IR, with an explicit loss report for fields not yet representable.
+- Conformance fixtures and a small schema/encoding verifier usable outside
+  the Rust implementation.
+
+** Acceptance criteria
+
+- The same input and producer configuration produce byte-identical canonical
+  IR and the same stable IDs across repeated runs and supported platforms.
+- A decode/encode round trip preserves every supported field, absent versus
+  present-empty values, exact scalar values, provenance, and unknown
+  extensions; a schema or profile mismatch is rejected with an actionable
+  diagnostic.
+- Two independent consumers can read the conformance fixtures and recover
+  declarations, bindings, references, spans, and match evidence without
+  importing Rust code.
+- Existing JavaScript diff, mapping, dump, and CLI tests remain green, and a
+  fixture comparison demonstrates that IR serialization does not change the
+  current no-LLM result.
+- The loss report is empty for the declared Phase 5 subset and is explicit,
+  machine-readable, and tested for any excluded construct.
+
+* Phase 6: Source Map v3 and symbol-lineage propagation
+
+** Objective
+
+Decode and emit the Source Map v3 data needed to connect generated code back
+to original files, names, and spans, then propagate the Phase 5 symbol IDs
+through canonicalization, minification, bundling, and other declared
+transforms.  Lineage is a relation between artifacts; it is not a replacement
+for the symbol identity in the IR.
+
+** Prerequisites
+
+- Phase 5 span, symbol, module, and provenance fields with stable artifact
+  and producer identities.
+- A Source Map v3 contract covering `version`, `sourceRoot`, `sources`,
+  `names`, `sourcesContent`, VLQ `mappings`, and the policy for indexed
+  `sections` maps.  The unsupported subset must be explicit.
+- Transform boundaries and composition rules: generated-to-original and
+  original-to-generated queries, map chaining, overlap/ambiguity behavior,
+  and handling for generated bytes with no original source.
+- Fixtures from at least one minifier and one bundler, including names that
+  are intentionally absent or duplicated.
+
+** Deliverables
+
+- A streaming-safe Source Map v3 parser/validator and deterministic emitter,
+  with bounded handling for malformed VLQ, offsets, and section nesting.
+- Bidirectional span queries and composed map support, with explicit
+  one-to-many, many-to-one, and unmapped lineage records.
+- IR lineage edges carrying source-map artifact identity, generated/original
+  spans, transform stage, and confidence/ambiguity diagnostics.
+- CLI/report output that can show the original name and location while
+  retaining generated spelling and the underlying stable symbol ID.
+
+** Acceptance criteria
+
+- Standard v3 fixtures decode to exact generated-line/column to
+  source/name/span mappings, and re-emitted maps are deterministic and
+  accepted by an independent Source Map consumer.
+- Map chaining preserves lineage through two or more transforms; tests cover
+  line starts, columns, section offsets, `sourcesContent`, and non-ASCII
+  source text.
+- Unmapped, ambiguous, out-of-range, and duplicate-name cases are reported
+  explicitly and never assigned a guessed symbol or location.
+- A generated declaration and its original declaration retain one stable IR
+  identity (or a documented split/merge relation), while display names and
+  spans remain queryable in both directions.
+- Existing diff results are unchanged when no map is supplied, and mapped
+  output is covered by golden fixtures plus malformed-input tests.
+
+* Phase 7: calibrated confidence and reviewable asynchronous LLM naming
+
+** Objective
+
+Offer names as suggestions for human review, backed by calibrated evidence
+and durable asynchronous jobs.  LLM output is never part of the identity,
+never required to compute a structural diff, and is never applied without an
+explicit approval decision.
+
+** Prerequisites
+
+- Phase 5 stable symbol IDs and versioned artifacts; Phase 6 lineage and
+  display-location queries.
+- Deterministic matching evidence (structural similarity, fingerprints,
+  scope/lineage context, and rejection reasons) and a review report format.
+- A curated, held-out calibration set with accepted/rejected names,
+  ambiguous cases, and abstentions; the set must not be used to tune and
+  report the same metric.
+- A durable job/result store with idempotency keys, artifact/config digests,
+  model/provider/effort identifiers, prompt version, and a redaction policy.
+
+** Deliverables
+
+- Confidence tiers and calibration tooling (for example, reliability curves,
+  expected calibration error, Brier score, and precision/coverage by tier),
+  with thresholds that are configuration rather than hidden constants.
+- An asynchronous queue and result schema supporting submit, retry, resume,
+  cancel, expire, and review; stale results are rejected by artifact and
+  prompt/config digest.
+- Review UI/CLI and import/export format keyed by stable symbol ID, showing
+  evidence, lineage, candidate name, confidence, model metadata, and an
+  explicit approve/reject/edit/abstain decision.
+- Audit records that preserve the exact user-provided text and decision;
+  expanded context belongs only in the model request and is not treated as a
+  replacement for the durable source text.
+
+** Acceptance criteria
+
+- On the held-out calibration set, reported confidence is measured and
+  thresholds satisfy the published precision/coverage targets; abstention is
+  available and measured rather than counted as success.
+- Repeating a job with the same artifact, configuration, prompt version, and
+  idempotency key does not create duplicate applied names.  Restarting after
+  interruption and retrying after a provider failure are safe.
+- A result for an older artifact, source-map lineage, prompt, or model
+  configuration cannot be applied and produces a visible stale-result error.
+- Suggestions are visibly separate from approved names; no suggestion changes
+  canonicalization or diff output until a reviewer approves it.
+- Offline/no-provider operation passes the full existing test suite, and a
+  privacy test confirms that redacted or private symbols are not sent to an
+  LLM without an explicit policy decision.
+- Every applied name can be traced to its evidence, reviewer decision, model
+  and provider, effort/configuration, prompt version, and artifact digest.
+
+* Phase 8: TypeScript/JSX and bundle adapters, then Wasm/native instruction IR
+
+** Objective
+
+Extend the shared IR through two deliberately ordered adapter layers:
+TypeScript/JSX syntax and bundle/module artifacts first; WebAssembly and
+native instruction representations only after those contracts are stable.
+These adapters decode and compare artifacts.  They do not execute untrusted
+JavaScript, Wasm, or native code.
+
+** Prerequisites
+
+- Phase 5 schema extension and unknown-node policy; Phase 6 lineage and map
+  composition; bounded parser/decoder resource limits.
+- A grammar/version matrix for TypeScript and JSX, including the policy for
+  type-only or erased syntax and JSX source spans.
+- A bundle fixture corpus and adapter contract for module/chunk graphs,
+  dynamic imports, tree-shaking, code splitting, loaders, and generated
+  source maps.
+- For Wasm/native work, format/version and architecture identities, byte
+  ranges, relocation/debug metadata policy, and a clear unsupported-opcode
+  behavior.  Native decoding must be read-only and architecture-scoped.
+
+** Deliverables: TypeScript/JSX and bundles
+
+- Front ends that emit the same symbol, scope, relation, diagnostic, and
+  provenance vocabulary for TypeScript and JSX, while retaining syntax that
+  cannot be represented as runtime JavaScript.
+- Bundle adapters that expose module/chunk identity, dependency edges,
+  re-exports, split points, and generated-to-source lineage without flattening
+  distinct modules into one synthetic namespace.
+- Cross-language and cross-transform fixtures, with explicit loss reports for
+  erased types or unsupported syntax.
+
+** Acceptance criteria: TypeScript/JSX and bundles
+
+- Fixtures containing annotations, generics, interfaces, enums, decorators
+  (where supported), JSX fragments, namespaces, imports/exports, dynamic
+  imports, and code splitting parse or fail with a named, tested diagnostic;
+  they never silently fall back to a JavaScript-only interpretation.
+- Symbol IDs and lineage remain stable when types are erased or JSX is
+  transformed, and reports can show both original and generated locations.
+- Bundle graph output is deterministic, preserves module boundaries and
+  re-export relations, and composes with Phase 6 Source Map v3 fixtures.
+- Existing JavaScript behavior and performance gates remain green when these
+  adapters are not selected.
+
+** Deliverables: Wasm and native instruction IR
+
+- A Wasm adapter keyed by module/version that records functions, locals,
+  blocks, instructions, byte offsets, imports/exports, custom sections, and
+  available name/debug lineage in the shared IR.
+- A native instruction adapter with an explicit architecture/ABI/disassembler
+  identity, instruction byte ranges, control-flow edges, symbols/relocations,
+  and an unknown-instruction representation.
+- A lower-level instruction schema/profile distinct from source-language
+  symbols, with relations for inlining, lowering, split/merge, and
+  source-to-instruction lineage.
+- Resource-limit, malformed-input, and no-execution tests for every decoder.
+
+** Acceptance criteria: Wasm and native instruction IR
+
+- Wasm fixtures from each declared version decode deterministically; function
+  and instruction offsets, imports/exports, custom sections, and debug names
+  round-trip or produce an explicit loss report.  No decoder executes code.
+- Native fixtures are labeled by architecture and decoder version; supported
+  instructions retain exact bytes and offsets, while unsupported or ambiguous
+  bytes remain visible as unknown and never receive invented semantics.
+- Lowering tests demonstrate a traceable relation from a Phase 5 symbol
+  through TypeScript/JSX or bundle output to Wasm/native instructions where
+  debug/lineage data exists, and clearly report when it does not.
+- Malformed, adversarial, oversized, and truncated inputs terminate within
+  configured limits with diagnostics; they cannot crash the process or cause
+  unbounded allocation.
+- The instruction adapters are opt-in and do not alter JavaScript diff output;
+  their schemas, architecture/version identities, and fixture evidence are
+  published before adding another target.
+
+* Cross-phase exit checklist
+
+Before starting the next phase, record:
+
+1. Versioned schemas and compatibility policy.
+2. Golden, malformed, property, and performance fixtures.
+3. Reproducible artifact/config digests and a loss/diagnostic report.
+4. A no-LLM/no-network test path for the core diff.
+5. Security and resource-limit results for all new parsers, decoders, and
+   background jobs.
+6. Documentation of unsupported cases; absence of evidence is not treated as
+   support.
+
+The roadmap is complete when each phase has met its own acceptance criteria
+and the resulting artifacts can be consumed independently.  A green subset
+of tests or a successful parser build is not a phase-completion claim.
