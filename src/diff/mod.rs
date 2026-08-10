@@ -1,8 +1,8 @@
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use anyhow::Result;
 use tree_sitter::{Node, Tree};
-use serde::{Serialize, Deserialize};
 
 pub mod fingerprint;
 pub mod matching_report;
@@ -71,7 +71,6 @@ impl From<&Declaration> for SerializableDeclaration {
     }
 }
 
-
 // Thread-safe declaration data for parallel processing
 #[derive(Debug, Clone)]
 pub struct DeclarationData {
@@ -79,6 +78,8 @@ pub struct DeclarationData {
     kind: DeclarationKind,
     line: usize,
     end_line: usize,
+    start_byte: usize,
+    end_byte: usize,
     signature: String,
     structural_hashes: HashSet<u64>,
     size: usize,
@@ -93,6 +94,8 @@ impl Declaration {
             kind: self.kind.clone(),
             line: self.line,
             end_line: self.end_line,
+            start_byte: self.start_byte,
+            end_byte: self.end_byte,
             signature: self.signature.clone(),
             structural_hashes: self.structural_hashes.clone(),
             size: self.size,
@@ -133,7 +136,7 @@ fn apply_kind_penalty(similarity: f64, kind1: &DeclarationKind, kind2: &Declarat
     let is_func_var_swap = matches!(
         (kind1, kind2),
         (DeclarationKind::Function, DeclarationKind::Variable)
-        | (DeclarationKind::Variable, DeclarationKind::Function)
+            | (DeclarationKind::Variable, DeclarationKind::Function)
     );
     similarity * if is_func_var_swap { 0.9 } else { 0.7 }
 }
@@ -193,7 +196,7 @@ pub struct Location {
     pub line: usize,
     pub column: usize,
     pub code_snippet: String,
-    pub end_line: Option<usize>,  // Optional end line for line ranges
+    pub end_line: Option<usize>, // Optional end line for line ranges
 }
 
 /// Extract source text by line range. O(1) with pre-built line vector.
@@ -210,37 +213,52 @@ pub fn extract_source_range(lines: &[&str], start_line: usize, end_line: usize) 
     lines[start..end].join("\n")
 }
 
+/// Extract an exact declaration range from UTF-8 source text.
+/// Tree-sitter byte offsets are guaranteed to fall on character boundaries for
+/// nodes produced from the same source. Invalid or stale ranges fail closed.
+pub fn extract_source_bytes(source: &str, start_byte: usize, end_byte: usize) -> &str {
+    source.get(start_byte..end_byte).unwrap_or("")
+}
+
 impl StructuralDiff {
     pub fn new() -> Self {
         Self {
             mappings1: None,
             mappings2: None,
-            use_fingerprints: true,  // Default to true for better accuracy
+            use_fingerprints: true, // Default to true for better accuracy
             generate_report: false,
             report_path: None,
         }
     }
-    
-    pub fn extract_declarations_for_inspection<'a>(&self, root: Node<'a>, source: &str) -> Vec<Declaration> {
+
+    pub fn extract_declarations_for_inspection<'a>(
+        &self,
+        root: Node<'a>,
+        source: &str,
+    ) -> Vec<Declaration> {
         self.extract_declarations(root, source)
     }
-    
-    
+
     pub fn set_use_fingerprints(&mut self, use_fingerprints: bool) {
         self.use_fingerprints = use_fingerprints;
     }
-    
+
     pub fn set_generate_report(&mut self, generate_report: bool) {
         self.generate_report = generate_report;
     }
-    
+
     pub fn set_report_path(&mut self, path: std::path::PathBuf) {
         self.report_path = Some(path.to_string_lossy().to_string());
-        self.generate_report = true;  // Automatically enable report if path is set
+        self.generate_report = true; // Automatically enable report if path is set
     }
 
     /// Format string diff for display, highlighting important changes
-    fn calculate_line_statistics(&self, result: &DiffResult, _source1: &str, _source2: &str) -> (usize, usize, usize) {
+    fn calculate_line_statistics(
+        &self,
+        result: &DiffResult,
+        _source1: &str,
+        _source2: &str,
+    ) -> (usize, usize, usize) {
         let mut declarations_added = 0;
         let mut declarations_removed = 0;
         let mut declarations_modified = 0;
@@ -249,53 +267,67 @@ impl StructuralDiff {
             match change.change_type {
                 ChangeType::Addition => declarations_added += 1,
                 ChangeType::Deletion => declarations_removed += 1,
-                ChangeType::Modification => {
-                    match change.classification.as_ref() {
-                        Some(DiffClassification::Structural) | Some(DiffClassification::StringOnly) => {
-                            declarations_modified += 1;
-                        }
-                        _ => {}
+                ChangeType::Modification => match change.classification.as_ref() {
+                    Some(DiffClassification::Structural) | Some(DiffClassification::StringOnly) => {
+                        declarations_modified += 1;
                     }
-                }
+                    _ => {}
+                },
                 ChangeType::Reorder => {}
             }
         }
 
-        (declarations_added, declarations_removed, declarations_added + declarations_removed + declarations_modified)
+        (
+            declarations_added,
+            declarations_removed,
+            declarations_added + declarations_removed + declarations_modified,
+        )
     }
-    
-    
+
     pub fn set_mappings1(&mut self, mappings: HashMap<String, String>) {
         self.mappings1 = Some(mappings);
     }
-    
+
     pub fn set_mappings2(&mut self, mappings: HashMap<String, String>) {
         self.mappings2 = Some(mappings);
     }
-    
-    
-    pub fn compare(&self, source1: &str, source2: &str, 
-                  tree1: &Tree, tree2: &Tree,
-                  dump: Option<&std::path::Path>,
-                  file1_path: &std::path::Path, file2_path: &std::path::Path) -> Result<DiffResult> {
-        use profiling::Timer;
+
+    pub fn compare(
+        &self,
+        source1: &str,
+        source2: &str,
+        tree1: &Tree,
+        tree2: &Tree,
+        dump: Option<&std::path::Path>,
+        file1_path: &std::path::Path,
+        file2_path: &std::path::Path,
+    ) -> Result<DiffResult> {
         use crate::dump::{AstDiffDump, DiffConfig};
-        
+        use profiling::Timer;
+
         // Extract declarations
         let declarations1 = {
             let _timer = Timer::new("extract_declarations_file1");
             self.extract_declarations(tree1.root_node(), source1)
         };
-        
+
         let declarations2 = {
             let _timer = Timer::new("extract_declarations_file2");
             self.extract_declarations(tree2.root_node(), source2)
         };
-        
+
         // Compare declarations
         let need_dump = dump.is_some();
-        let declarations1_clone = if need_dump { Some(declarations1.clone()) } else { None };
-        let declarations2_clone = if need_dump { Some(declarations2.clone()) } else { None };
+        let declarations1_clone = if need_dump {
+            Some(declarations1.clone())
+        } else {
+            None
+        };
+        let declarations2_clone = if need_dump {
+            Some(declarations2.clone())
+        } else {
+            None
+        };
 
         let result = self.compare_declarations(declarations1, declarations2, source1, source2)?;
 
@@ -305,11 +337,15 @@ impl StructuralDiff {
 
             let decls1_clone = declarations1_clone.unwrap();
             let decls2_clone = declarations2_clone.unwrap();
-            let decls1: Vec<SerializableDeclaration> = decls1_clone.iter().map(|d| d.into()).collect();
-            let decls2: Vec<SerializableDeclaration> = decls2_clone.iter().map(|d| d.into()).collect();
+            let decls1: Vec<SerializableDeclaration> =
+                decls1_clone.iter().map(|d| d.into()).collect();
+            let decls2: Vec<SerializableDeclaration> =
+                decls2_clone.iter().map(|d| d.into()).collect();
 
             // Reconstruct match data from changes
-            let matches: Vec<(usize, usize, f64)> = result.changes.iter()
+            let matches: Vec<(usize, usize, f64)> = result
+                .changes
+                .iter()
                 .filter(|c| matches!(c.change_type, ChangeType::Modification))
                 .filter_map(|c| {
                     let loc1 = c.location1.as_ref()?;
@@ -342,13 +378,21 @@ impl StructuralDiff {
 
         Ok(result)
     }
-    
-    pub fn compare_declarations(&self, declarations1: Vec<Declaration>, declarations2: Vec<Declaration>,
-                              source1: &str, source2: &str) -> Result<DiffResult> {
+
+    pub fn compare_declarations(
+        &self,
+        declarations1: Vec<Declaration>,
+        declarations2: Vec<Declaration>,
+        source1: &str,
+        source2: &str,
+    ) -> Result<DiffResult> {
         use profiling::Timer;
 
-        eprintln!("Extracted {} declarations from file1, {} from file2",
-                 declarations1.len(), declarations2.len());
+        eprintln!(
+            "Extracted {} declarations from file1, {} from file2",
+            declarations1.len(),
+            declarations2.len()
+        );
 
         // Match declarations — now returns rename map and pre-classified changes
         let (matches, changes, rename_map) = {
@@ -382,11 +426,20 @@ impl StructuralDiff {
         self.extract_declarations_recursive(root, source, &mut declarations, true);
         declarations
     }
-    
-    fn create_declaration(&self, name: String, kind: DeclarationKind,
-                         line: usize, end_line: usize, start_byte: usize, end_byte: usize,
-                         node_kind: &str, signature: String, structural_hashes: HashSet<u64>,
-                         fingerprint: Option<FunctionFingerprint>) -> Declaration {
+
+    fn create_declaration(
+        &self,
+        name: String,
+        kind: DeclarationKind,
+        line: usize,
+        end_line: usize,
+        start_byte: usize,
+        end_byte: usize,
+        node_kind: &str,
+        signature: String,
+        structural_hashes: HashSet<u64>,
+        fingerprint: Option<FunctionFingerprint>,
+    ) -> Declaration {
         let size = structural_hashes.len();
         let minhash_signature = self.compute_minhash(&structural_hashes, 128);
 
@@ -406,7 +459,16 @@ impl StructuralDiff {
         }
     }
 
-    fn extract_fingerprint(&self, node: Node, source: &str, kind: &DeclarationKind, name: &str) -> Option<FunctionFingerprint> {
+    fn extract_fingerprint(
+        &self,
+        node: Node,
+        source: &str,
+        kind: &DeclarationKind,
+        name: &str,
+    ) -> Option<FunctionFingerprint> {
+        if !self.use_fingerprints {
+            return None;
+        }
         if !matches!(kind, DeclarationKind::Function | DeclarationKind::Variable) {
             return None;
         }
@@ -415,8 +477,14 @@ impl StructuralDiff {
         let fp = extractor.extract_function_fingerprint(node);
 
         if std::env::var("ASTDIFF_DEBUG").is_ok() && !fp.strings.is_empty() {
-            eprintln!("Fingerprint for {} '{}': {} strings, {} constants, {} API calls",
-                kind, name, fp.strings.len(), fp.constants.len(), fp.api_calls.len());
+            eprintln!(
+                "Fingerprint for {} '{}': {} strings, {} constants, {} API calls",
+                kind,
+                name,
+                fp.strings.len(),
+                fp.constants.len(),
+                fp.api_calls.len()
+            );
             for s in &fp.strings {
                 eprintln!("  String: '{}' ({:?})", s.value, s.context);
             }
@@ -424,8 +492,14 @@ impl StructuralDiff {
 
         Some(fp)
     }
-    
-    fn extract_declarations_recursive<'a>(&self, node: Node<'a>, source: &str, declarations: &mut Vec<Declaration>, is_global: bool) {
+
+    fn extract_declarations_recursive<'a>(
+        &self,
+        node: Node<'a>,
+        source: &str,
+        declarations: &mut Vec<Declaration>,
+        is_global: bool,
+    ) {
         match node.kind() {
             "function_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
@@ -435,10 +509,16 @@ impl StructuralDiff {
                     let signature = self.get_function_signature(node, source);
                     let structural_hashes = self.collect_structural_hashes(node, source);
                     declarations.push(self.create_declaration(
-                        name.to_string(), kind,
-                        node.start_position().row + 1, node.end_position().row + 1,
-                        node.start_byte(), node.end_byte(), node.kind(),
-                        signature, structural_hashes, fp,
+                        name.to_string(),
+                        kind,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        node.start_byte(),
+                        node.end_byte(),
+                        node.kind(),
+                        signature,
+                        structural_hashes,
+                        fp,
                     ));
                 }
             }
@@ -454,16 +534,23 @@ impl StructuralDiff {
                                 let kind = DeclarationKind::Variable;
                                 let fp = self.extract_fingerprint(child, source, &kind, name);
                                 let signature = self.get_variable_signature(child, source);
-                                let structural_hashes = if let Some(value_node) = child.child_by_field_name("value") {
-                                    self.collect_structural_hashes(value_node, source)
-                                } else {
-                                    HashSet::new()
-                                };
+                                let structural_hashes =
+                                    if let Some(value_node) = child.child_by_field_name("value") {
+                                        self.collect_structural_hashes(value_node, source)
+                                    } else {
+                                        HashSet::new()
+                                    };
                                 declarations.push(self.create_declaration(
-                                    name.to_string(), kind,
-                                    child.start_position().row + 1, child.end_position().row + 1,
-                                    child.start_byte(), child.end_byte(), child.kind(),
-                                    signature, structural_hashes, fp,
+                                    name.to_string(),
+                                    kind,
+                                    child.start_position().row + 1,
+                                    child.end_position().row + 1,
+                                    child.start_byte(),
+                                    child.end_byte(),
+                                    child.kind(),
+                                    signature,
+                                    structural_hashes,
+                                    fp,
                                 ));
                             }
                         }
@@ -478,10 +565,16 @@ impl StructuralDiff {
                     let signature = self.get_class_signature(node, source);
                     let structural_hashes = self.collect_structural_hashes(node, source);
                     declarations.push(self.create_declaration(
-                        name.to_string(), kind,
-                        node.start_position().row + 1, node.end_position().row + 1,
-                        node.start_byte(), node.end_byte(), node.kind(),
-                        signature, structural_hashes, fp,
+                        name.to_string(),
+                        kind,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        node.start_byte(),
+                        node.end_byte(),
+                        node.kind(),
+                        signature,
+                        structural_hashes,
+                        fp,
                     ));
                 }
             }
@@ -492,10 +585,16 @@ impl StructuralDiff {
                 let signature = self.get_import_signature(node, source);
                 let structural_hashes = self.collect_structural_hashes(node, source);
                 declarations.push(self.create_declaration(
-                    name, kind,
-                    node.start_position().row + 1, node.end_position().row + 1,
-                    node.start_byte(), node.end_byte(), node.kind(),
-                    signature, structural_hashes, fp,
+                    name,
+                    kind,
+                    node.start_position().row + 1,
+                    node.end_position().row + 1,
+                    node.start_byte(),
+                    node.end_byte(),
+                    node.kind(),
+                    signature,
+                    structural_hashes,
+                    fp,
                 ));
             }
             "export_statement" => {
@@ -508,37 +607,53 @@ impl StructuralDiff {
                     let signature = self.get_export_signature(node, source);
                     let structural_hashes = self.collect_structural_hashes(node, source);
                     declarations.push(self.create_declaration(
-                        name, kind,
-                        node.start_position().row + 1, node.end_position().row + 1,
-                        node.start_byte(), node.end_byte(), node.kind(),
-                        signature, structural_hashes, fp,
+                        name,
+                        kind,
+                        node.start_position().row + 1,
+                        node.end_position().row + 1,
+                        node.start_byte(),
+                        node.end_byte(),
+                        node.kind(),
+                        signature,
+                        structural_hashes,
+                        fp,
                     ));
                 }
             }
             _ => {
                 // Only look for global declarations at the top level
-                if is_global && node == node.parent().map(|p| p.child(0)).flatten().unwrap_or(node) {
+                if is_global && node == node.parent().map(|p| p.child(0)).flatten().unwrap_or(node)
+                {
                     for child in node.children(&mut node.walk()) {
-                        self.extract_declarations_recursive(child, source, declarations, 
-                            child.kind() != "function_declaration" && 
-                            child.kind() != "class_declaration");
+                        self.extract_declarations_recursive(
+                            child,
+                            source,
+                            declarations,
+                            child.kind() != "function_declaration"
+                                && child.kind() != "class_declaration",
+                        );
                     }
                 }
             }
         }
     }
-    
+
     fn collect_structural_hashes(&self, node: Node, source: &str) -> HashSet<u64> {
         let mut hashes = HashSet::new();
         self.collect_structural_hashes_recursive(node, source, &mut hashes);
         hashes
     }
-    
-    fn collect_structural_hashes_recursive(&self, node: Node, source: &str, hashes: &mut HashSet<u64>) {
+
+    fn collect_structural_hashes_recursive(
+        &self,
+        node: Node,
+        source: &str,
+        hashes: &mut HashSet<u64>,
+    ) {
         // Compute hash for this node
         let hash = self.compute_structural_hash(node, source);
         hashes.insert(hash);
-        
+
         // Recursively collect hashes from children
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -547,22 +662,22 @@ impl StructuralDiff {
                 if !matches!(child.kind(), "comment") {
                     self.collect_structural_hashes_recursive(child, source, hashes);
                 }
-                
+
                 if !cursor.goto_next_sibling() {
                     break;
                 }
             }
         }
     }
-    
+
     fn compute_structural_hash(&self, node: Node, source: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
-        
+
         let mut hasher = DefaultHasher::new();
-        
+
         // Hash node type
         node.kind().hash(&mut hasher);
-        
+
         // For literals, include the value
         if self.is_literal(node) {
             source[node.byte_range()].hash(&mut hasher);
@@ -576,10 +691,13 @@ impl StructuralDiff {
                 let mut child_hashes = Vec::new();
                 loop {
                     let child = cursor.node();
-                    if !matches!(child.kind(), "comment" | ";" | "," | "(" | ")" | "{" | "}" | "[" | "]") {
+                    if !matches!(
+                        child.kind(),
+                        "comment" | ";" | "," | "(" | ")" | "{" | "}" | "[" | "]"
+                    ) {
                         child_hashes.push(self.compute_structural_hash(child, source));
                     }
-                    
+
                     if !cursor.goto_next_sibling() {
                         break;
                     }
@@ -593,32 +711,34 @@ impl StructuralDiff {
                 }
             }
         }
-        
+
         hasher.finish()
     }
-    
+
     fn get_function_signature(&self, node: Node, _source: &str) -> String {
         let params = if let Some(params_node) = node.child_by_field_name("parameters") {
-            let param_count = params_node.children(&mut params_node.walk())
+            let param_count = params_node
+                .children(&mut params_node.walk())
                 .filter(|n| n.kind() == "identifier" || n.kind() == "formal_parameters")
                 .count();
             format!("params:{}", param_count)
         } else {
             "params:0".to_string()
         };
-        
+
         let body = if let Some(body_node) = node.child_by_field_name("body") {
-            let statement_count = body_node.children(&mut body_node.walk())
+            let statement_count = body_node
+                .children(&mut body_node.walk())
                 .filter(|n| !matches!(n.kind(), "{" | "}" | ";"))
                 .count();
             format!("stmts:{}", statement_count)
         } else {
             "stmts:0".to_string()
         };
-        
+
         format!("function({},{})", params, body)
     }
-    
+
     fn get_variable_signature(&self, node: Node, source: &str) -> String {
         if let Some(init) = node.child_by_field_name("value") {
             match init.kind() {
@@ -626,8 +746,12 @@ impl StructuralDiff {
                 "string" => format!("var=string:len{}", source[init.byte_range()].len()),
                 "true" | "false" => format!("var=bool:{}", init.kind()),
                 "array" => format!("var=array:len{}", init.children(&mut init.walk()).count()),
-                "object" => format!("var=object:props{}", init.children(&mut init.walk())
-                    .filter(|n| n.kind() == "pair").count()),
+                "object" => format!(
+                    "var=object:props{}",
+                    init.children(&mut init.walk())
+                        .filter(|n| n.kind() == "pair")
+                        .count()
+                ),
                 "arrow_function" | "function" => {
                     let param_count = if let Some(params) = init.child_by_field_name("parameters") {
                         params.children(&mut params.walk()).count()
@@ -644,13 +768,15 @@ impl StructuralDiff {
             "var=undefined".to_string()
         }
     }
-    
+
     fn get_class_signature(&self, node: Node, _source: &str) -> String {
         if let Some(body) = node.child_by_field_name("body") {
-            let method_count = body.children(&mut body.walk())
+            let method_count = body
+                .children(&mut body.walk())
                 .filter(|n| n.kind() == "method_definition")
                 .count();
-            let field_count = body.children(&mut body.walk())
+            let field_count = body
+                .children(&mut body.walk())
                 .filter(|n| n.kind() == "field_definition")
                 .count();
             format!("class(methods:{},fields:{})", method_count, field_count)
@@ -658,20 +784,22 @@ impl StructuralDiff {
             "class()".to_string()
         }
     }
-    
+
     fn get_import_signature(&self, node: Node, source: &str) -> String {
-        let source_path = node.children(&mut node.walk())
+        let source_path = node
+            .children(&mut node.walk())
             .find(|n| n.kind() == "string")
             .map(|n| &source[n.byte_range()])
             .unwrap_or("");
         format!("import from {}", source_path)
     }
-    
+
     fn get_export_signature(&self, node: Node, _source: &str) -> String {
         if node.child_by_field_name("declaration").is_some() {
             "export declaration".to_string()
         } else if let Some(clause) = node.child_by_field_name("clause") {
-            let export_count = clause.children(&mut clause.walk())
+            let export_count = clause
+                .children(&mut clause.walk())
                 .filter(|n| n.kind() == "export_specifier")
                 .count();
             format!("export {} items", export_count)
@@ -679,20 +807,20 @@ impl StructuralDiff {
             "export".to_string()
         }
     }
-    
+
     fn compute_minhash(&self, hashes: &HashSet<u64>, num_hashes: usize) -> Vec<u64> {
         let mut signature = vec![u64::MAX; num_hashes];
-        
+
         for &hash in hashes {
             for i in 0..num_hashes {
                 let hash_value = self.hash_with_seed_u64(hash, i);
                 signature[i] = signature[i].min(hash_value);
             }
         }
-        
+
         signature
     }
-    
+
     fn hash_with_seed_u64(&self, value: u64, seed: usize) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         let mut hasher = DefaultHasher::new();
@@ -700,42 +828,64 @@ impl StructuralDiff {
         seed.hash(&mut hasher);
         hasher.finish()
     }
-    
-    
-    pub fn calculate_declaration_similarity(&self, decl1: &Declaration, decl2: &Declaration, _source1: &str, _source2: &str) -> f64 {
+
+    pub fn calculate_declaration_similarity(
+        &self,
+        decl1: &Declaration,
+        decl2: &Declaration,
+        _source1: &str,
+        _source2: &str,
+    ) -> f64 {
         // Delegate to the _data version via conversion
         let d1 = decl1.to_data();
         let d2 = decl2.to_data();
         self.calculate_declaration_similarity_data(&d1, &d2, "", "")
     }
-    
-    
-    
+
     fn is_literal(&self, node: Node) -> bool {
-        matches!(node.kind(), 
-            "string" | "number" | "true" | "false" | "null" | "undefined" | "regex" | "template_string"
+        matches!(
+            node.kind(),
+            "string"
+                | "number"
+                | "true"
+                | "false"
+                | "null"
+                | "undefined"
+                | "regex"
+                | "template_string"
         )
     }
-    
+
     fn is_order_independent(&self, node: Node) -> bool {
-        matches!(node.kind(), 
+        matches!(
+            node.kind(),
             "object" | "object_pattern" | "named_imports" | "export_clause"
         )
     }
-    
-    
-        
-    pub fn print_summary(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf,
-                         source1: &str, source2: &str) {
+
+    pub fn print_summary(
+        &self,
+        result: &DiffResult,
+        file1: &std::path::PathBuf,
+        file2: &std::path::PathBuf,
+        source1: &str,
+        source2: &str,
+    ) {
         println!("--- {}", file1.display());
         println!("+++ {}", file2.display());
         println!("Structural similarity: {:.1}%", result.similarity * 100.0);
-        println!("Matched declarations: {}/{} vs {}",
-                 result.matched_declarations, result.total_declarations1, result.total_declarations2);
+        println!(
+            "Matched declarations: {}/{} vs {}",
+            result.matched_declarations, result.total_declarations1, result.total_declarations2
+        );
 
         // Calculate and print line statistics
-        let (lines_added, lines_removed, total_diff) = self.calculate_line_statistics(result, source1, source2);
-        println!("Diff size: {} declarations (+{} added, -{} removed)", total_diff, lines_added, lines_removed);
+        let (lines_added, lines_removed, total_diff) =
+            self.calculate_line_statistics(result, source1, source2);
+        println!(
+            "Diff size: {} declarations (+{} added, -{} removed)",
+            total_diff, lines_added, lines_removed
+        );
 
         // Group changes by type using classification
         let mut additions = Vec::new();
@@ -758,13 +908,19 @@ impl StructuralDiff {
             }
         }
 
-        let total_unchanged = result.matched_declarations
+        let total_unchanged = result
+            .matched_declarations
             .saturating_sub(structural_changes.len())
             .saturating_sub(string_changes.len());
 
-        println!("Changes: {} added, {} removed, {} structural, {} string-only ({} unchanged)",
-            additions.len(), deletions.len(), structural_changes.len(),
-            string_changes.len(), total_unchanged);
+        println!(
+            "Changes: {} added, {} removed, {} structural, {} string-only ({} unchanged)",
+            additions.len(),
+            deletions.len(),
+            structural_changes.len(),
+            string_changes.len(),
+            total_unchanged
+        );
         println!();
 
         // Show deletions
@@ -821,10 +977,12 @@ impl StructuralDiff {
             println!();
         }
     }
-    
+
     pub fn generate_normalized_display_diff(
-        orig1: &str, orig2: &str,
-        norm1: &str, norm2: &str,
+        orig1: &str,
+        orig2: &str,
+        norm1: &str,
+        norm2: &str,
         context_lines: usize,
     ) -> String {
         use similar::{ChangeTag, TextDiff};
@@ -836,7 +994,11 @@ impl StructuralDiff {
         let mut output = String::new();
         let mut has_changes = false;
 
-        for hunk in diff.unified_diff().context_radius(context_lines).iter_hunks() {
+        for hunk in diff
+            .unified_diff()
+            .context_radius(context_lines)
+            .iter_hunks()
+        {
             has_changes = true;
             output.push_str(&format!("{}\n", hunk.header()));
             for change in hunk.iter_changes() {
@@ -847,18 +1009,16 @@ impl StructuralDiff {
                 };
                 // Look up the original (non-normalized) line at the same index
                 let orig_line = match change.tag() {
-                    ChangeTag::Delete | ChangeTag::Equal => {
-                        change.old_index()
-                            .and_then(|i| orig_lines1.get(i))
-                            .copied()
-                            .unwrap_or("")
-                    }
-                    ChangeTag::Insert => {
-                        change.new_index()
-                            .and_then(|i| orig_lines2.get(i))
-                            .copied()
-                            .unwrap_or("")
-                    }
+                    ChangeTag::Delete | ChangeTag::Equal => change
+                        .old_index()
+                        .and_then(|i| orig_lines1.get(i))
+                        .copied()
+                        .unwrap_or(""),
+                    ChangeTag::Insert => change
+                        .new_index()
+                        .and_then(|i| orig_lines2.get(i))
+                        .copied()
+                        .unwrap_or(""),
                 };
                 output.push_str(sign);
                 output.push_str(orig_line);
@@ -868,19 +1028,37 @@ impl StructuralDiff {
             }
         }
 
-        if has_changes { output } else { String::new() }
+        if has_changes {
+            output
+        } else {
+            String::new()
+        }
     }
 
-    pub fn print_default(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf,
-                         source1: &str, source2: &str) -> Result<()> {
-        let file1_name = file1.file_name().unwrap_or(file1.as_os_str()).to_string_lossy();
-        let file2_name = file2.file_name().unwrap_or(file2.as_os_str()).to_string_lossy();
+    pub fn print_default(
+        &self,
+        result: &DiffResult,
+        file1: &std::path::PathBuf,
+        file2: &std::path::PathBuf,
+        source1: &str,
+        source2: &str,
+    ) -> Result<()> {
+        let file1_name = file1
+            .file_name()
+            .unwrap_or(file1.as_os_str())
+            .to_string_lossy();
+        let file2_name = file2
+            .file_name()
+            .unwrap_or(file2.as_os_str())
+            .to_string_lossy();
 
         println!("--- {}", file1.display());
         println!("+++ {}", file2.display());
         println!("Structural similarity: {:.1}%", result.similarity * 100.0);
-        println!("Matched: {}/{} vs {}",
-            result.matched_declarations, result.total_declarations1, result.total_declarations2);
+        println!(
+            "Matched: {}/{} vs {}",
+            result.matched_declarations, result.total_declarations1, result.total_declarations2
+        );
 
         // Classify changes
         let mut additions = Vec::new();
@@ -891,24 +1069,29 @@ impl StructuralDiff {
             match change.change_type {
                 ChangeType::Addition => additions.push(change),
                 ChangeType::Deletion => deletions.push(change),
-                ChangeType::Modification => {
-                    match change.classification.as_ref() {
-                        Some(DiffClassification::Structural) => structural.push(change),
-                        Some(DiffClassification::StringOnly) => string_only.push(change),
-                        Some(DiffClassification::Unchanged) | None => {}
-                    }
-                }
+                ChangeType::Modification => match change.classification.as_ref() {
+                    Some(DiffClassification::Structural) => structural.push(change),
+                    Some(DiffClassification::StringOnly) => string_only.push(change),
+                    Some(DiffClassification::Unchanged) | None => {}
+                },
                 ChangeType::Reorder => {} // Implicit in location
             }
         }
 
         // Count unchanged as: matched - structural - string_only
-        let total_unchanged = result.matched_declarations
+        let total_unchanged = result
+            .matched_declarations
             .saturating_sub(structural.len())
             .saturating_sub(string_only.len());
 
-        println!("Changes: {} added, {} removed, {} structural, {} string-only ({} unchanged)",
-            additions.len(), deletions.len(), structural.len(), string_only.len(), total_unchanged);
+        println!(
+            "Changes: {} added, {} removed, {} structural, {} string-only ({} unchanged)",
+            additions.len(),
+            deletions.len(),
+            structural.len(),
+            string_only.len(),
+            total_unchanged
+        );
         println!();
 
         // === Removed ===
@@ -918,9 +1101,13 @@ impl StructuralDiff {
             for change in &deletions {
                 if let Some(loc) = &change.location1 {
                     let end = loc.end_line.unwrap_or(loc.line);
-                    println!("\n--- Removed {} ({}:{}-{})",
+                    println!(
+                        "\n--- Removed {} ({}:{}-{})",
                         Self::extract_name_from_desc(&change.description),
-                        file1_name, loc.line, end);
+                        file1_name,
+                        loc.line,
+                        end
+                    );
                     let body = extract_source_range(&lines1, loc.line, end);
                     for line in body.lines() {
                         println!("- {}", line);
@@ -937,9 +1124,13 @@ impl StructuralDiff {
             for change in &additions {
                 if let Some(loc) = &change.location2 {
                     let end = loc.end_line.unwrap_or(loc.line);
-                    println!("\n+++ Added {} ({}:{}-{})",
+                    println!(
+                        "\n+++ Added {} ({}:{}-{})",
                         Self::extract_name_from_desc(&change.description),
-                        file2_name, loc.line, end);
+                        file2_name,
+                        loc.line,
+                        end
+                    );
                     let body = extract_source_range(&lines2, loc.line, end);
                     for line in body.lines() {
                         println!("+ {}", line);
@@ -985,9 +1176,20 @@ impl StructuralDiff {
     }
 
     /// Compact output: location-only summary grouped by classification.
-    pub fn print_compact_locations(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf) {
-        let file1_name = file1.file_name().unwrap_or(file1.as_os_str()).to_string_lossy();
-        let file2_name = file2.file_name().unwrap_or(file2.as_os_str()).to_string_lossy();
+    pub fn print_compact_locations(
+        &self,
+        result: &DiffResult,
+        file1: &std::path::PathBuf,
+        file2: &std::path::PathBuf,
+    ) {
+        let file1_name = file1
+            .file_name()
+            .unwrap_or(file1.as_os_str())
+            .to_string_lossy();
+        let file2_name = file2
+            .file_name()
+            .unwrap_or(file2.as_os_str())
+            .to_string_lossy();
 
         // Classify changes
         let mut additions = Vec::new();
@@ -1010,7 +1212,8 @@ impl StructuralDiff {
             }
         }
 
-        let total_unchanged = result.matched_declarations
+        let total_unchanged = result
+            .matched_declarations
             .saturating_sub(structural.len())
             .saturating_sub(string_only.len());
 
@@ -1046,9 +1249,14 @@ impl StructuralDiff {
             for change in &structural {
                 if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
                     let name = Self::extract_name_from_desc(&change.description);
-                    let sim = change.similarity_score.map(|s| format!(" {:.1}%", s * 100.0)).unwrap_or_default();
-                    println!("  {} ({}:{} -> {}:{}){}",
-                        name, file1_name, loc1.line, file2_name, loc2.line, sim);
+                    let sim = change
+                        .similarity_score
+                        .map(|s| format!(" {:.1}%", s * 100.0))
+                        .unwrap_or_default();
+                    println!(
+                        "  {} ({}:{} -> {}:{}){}",
+                        name, file1_name, loc1.line, file2_name, loc2.line, sim
+                    );
                 }
             }
             println!();
@@ -1060,8 +1268,10 @@ impl StructuralDiff {
             for change in &string_only {
                 if let (Some(loc1), Some(loc2)) = (&change.location1, &change.location2) {
                     let name = Self::extract_name_from_desc(&change.description);
-                    println!("  {} ({}:{} -> {}:{})",
-                        name, file1_name, loc1.line, file2_name, loc2.line);
+                    println!(
+                        "  {} ({}:{} -> {}:{})",
+                        name, file1_name, loc1.line, file2_name, loc2.line
+                    );
                 }
             }
             println!();
@@ -1074,52 +1284,69 @@ impl StructuralDiff {
     fn extract_name_from_desc(desc: &str) -> &str {
         // Try patterns like "function 'foo' ..." or "Removed function 'foo'"
         if let Some(start) = desc.find('\'') {
-            if let Some(end) = desc[start+1..].find('\'') {
-                return &desc[start+1..start+1+end];
+            if let Some(end) = desc[start + 1..].find('\'') {
+                return &desc[start + 1..start + 1 + end];
             }
         }
         desc
     }
 
-    pub fn print_side_by_side(&self, result: &DiffResult, file1: &std::path::PathBuf, file2: &std::path::PathBuf,
-                               source1: &str, source2: &str) {
+    pub fn print_side_by_side(
+        &self,
+        result: &DiffResult,
+        file1: &std::path::PathBuf,
+        file2: &std::path::PathBuf,
+        source1: &str,
+        source2: &str,
+    ) {
         println!("Structural similarity: {:.1}%", result.similarity * 100.0);
         println!();
         // Simplified implementation
         self.print_summary(result, file1, file2, source1, source2);
     }
-    
+
     pub fn print_json(&self, result: &DiffResult) -> Result<()> {
         let json = serde_json::to_string_pretty(result)?;
         println!("{}", json);
         Ok(())
     }
-    
+
     pub fn generate_rename_mapping(&self, result: &DiffResult) -> HashMap<String, String> {
         let mut mappings = HashMap::new();
-        
+
         for change in &result.changes {
             if let ChangeType::Modification = change.change_type {
                 if change.description.contains("matched with") {
                     // Extract the rename relationship from the structural_path
-                    if let Some((from, to)) = change.structural_path
+                    if let Some((from, to)) = change
+                        .structural_path
                         .strip_prefix("global.")
-                        .and_then(|s| s.split_once("->")) {
+                        .and_then(|s| s.split_once("->"))
+                    {
                         mappings.insert(from.to_string(), to.to_string());
                     }
                 }
             }
         }
-        
+
         mappings
     }
-    
-    pub fn match_declarations(&self, decls1: &[Declaration], decls2: &[Declaration], source1: &str, source2: &str)
-        -> (Vec<(usize, usize)>, Vec<Change>, HashMap<String, String>) {
+
+    pub fn match_declarations(
+        &self,
+        decls1: &[Declaration],
+        decls2: &[Declaration],
+        source1: &str,
+        source2: &str,
+    ) -> (Vec<(usize, usize)>, Vec<Change>, HashMap<String, String>) {
         use parallel_matching_v2::ParallelMatcherV2;
         use profiling::Timer;
 
-        eprintln!("Using parallel matching v2 for {} x {} declarations", decls1.len(), decls2.len());
+        eprintln!(
+            "Using parallel matching v2 for {} x {} declarations",
+            decls1.len(),
+            decls2.len()
+        );
 
         // Convert to thread-safe data structures
         let data1: Vec<DeclarationData> = {
@@ -1154,19 +1381,38 @@ impl StructuralDiff {
             |d1, d2, fp1, fp2, s| self.create_evidence_breakdown_data(d1, d2, fp1, fp2, s),
         )
     }
-    
-    fn calculate_declaration_similarity_data(&self, decl1: &DeclarationData, decl2: &DeclarationData, _source1: &str, _source2: &str) -> f64 {
+
+    fn calculate_declaration_similarity_data(
+        &self,
+        decl1: &DeclarationData,
+        decl2: &DeclarationData,
+        _source1: &str,
+        _source2: &str,
+    ) -> f64 {
         // For imports and exports, use signature similarity regardless of kind
-        if matches!(decl1.kind, DeclarationKind::Import | DeclarationKind::Export)
-            || matches!(decl2.kind, DeclarationKind::Import | DeclarationKind::Export) {
-            return if decl1.signature == decl2.signature { 1.0 } else { 0.3 };
+        if matches!(
+            decl1.kind,
+            DeclarationKind::Import | DeclarationKind::Export
+        ) || matches!(
+            decl2.kind,
+            DeclarationKind::Import | DeclarationKind::Export
+        ) {
+            return if decl1.signature == decl2.signature {
+                1.0
+            } else {
+                0.3
+            };
         }
 
         let size1 = decl1.structural_hashes.len();
         let size2 = decl2.structural_hashes.len();
 
         if size1 == 0 && size2 == 0 {
-            let base = if decl1.signature == decl2.signature { 1.0 } else { 0.5 };
+            let base = if decl1.signature == decl2.signature {
+                1.0
+            } else {
+                0.5
+            };
             return apply_kind_penalty(base, &decl1.kind, &decl2.kind);
         }
 
@@ -1177,20 +1423,33 @@ impl StructuralDiff {
         }
 
         // Jaccard similarity from structural hash intersection
-        let intersection: HashSet<_> = decl1.structural_hashes.intersection(&decl2.structural_hashes).cloned().collect();
-        let union: HashSet<_> = decl1.structural_hashes.union(&decl2.structural_hashes).cloned().collect();
+        let intersection: HashSet<_> = decl1
+            .structural_hashes
+            .intersection(&decl2.structural_hashes)
+            .cloned()
+            .collect();
+        let union: HashSet<_> = decl1
+            .structural_hashes
+            .union(&decl2.structural_hashes)
+            .cloned()
+            .collect();
         let base_similarity = intersection.len() as f64 / union.len() as f64;
 
         apply_kind_penalty(base_similarity, &decl1.kind, &decl2.kind)
     }
-    
-    fn create_evidence_breakdown_data(&self, decl1: &DeclarationData, decl2: &DeclarationData, 
-                                     fp1: &FunctionFingerprint, fp2: &FunctionFingerprint, 
-                                     scorer: &RarityScorer) -> EvidenceBreakdown {
+
+    fn create_evidence_breakdown_data(
+        &self,
+        decl1: &DeclarationData,
+        decl2: &DeclarationData,
+        fp1: &FunctionFingerprint,
+        fp2: &FunctionFingerprint,
+        scorer: &RarityScorer,
+    ) -> EvidenceBreakdown {
         let mut string_matches = Vec::new();
         let mut constant_matches = Vec::new();
         let mut api_matches = Vec::new();
-        
+
         // Match strings
         for s1 in &fp1.strings {
             for s2 in &fp2.strings {
@@ -1214,7 +1473,7 @@ impl StructuralDiff {
                 }
             }
         }
-        
+
         // Match constants
         for c1 in &fp1.constants {
             for c2 in &fp2.constants {
@@ -1227,7 +1486,8 @@ impl StructuralDiff {
                             ConstantValue::Float(_) => "float",
                             ConstantValue::Regex(_) => "regex",
                             ConstantValue::Duration(_) => "duration",
-                        }.to_string(),
+                        }
+                        .to_string(),
                         rarity_score: rarity,
                         contribution: rarity * 0.8,
                     });
@@ -1235,16 +1495,18 @@ impl StructuralDiff {
                 }
             }
         }
-        
+
         // Match API calls
         for api1 in &fp1.api_calls {
             for api2 in &fp2.api_calls {
                 if api1.object == api2.object && api1.method == api2.method {
                     let rarity = scorer.score_api_call(api1);
                     api_matches.push(ApiMatch {
-                        call: format!("{}.{}", 
-                            api1.object.as_deref().unwrap_or("global"), 
-                            api1.method),
+                        call: format!(
+                            "{}.{}",
+                            api1.object.as_deref().unwrap_or("global"),
+                            api1.method
+                        ),
                         first_arg: api1.first_arg.clone(),
                         rarity_score: rarity,
                         contribution: rarity * 0.6,
@@ -1253,30 +1515,34 @@ impl StructuralDiff {
                 }
             }
         }
-        
+
         // Calculate unique elements
-        let unique_strings1: Vec<_> = fp1.strings.iter()
+        let unique_strings1: Vec<_> = fp1
+            .strings
+            .iter()
             .filter(|s| !fp2.strings.iter().any(|s2| s2.value == s.value))
             .map(|s| (s.value.clone(), format!("{:?}", s.context)))
             .collect();
-            
-        let unique_strings2: Vec<_> = fp2.strings.iter()
+
+        let unique_strings2: Vec<_> = fp2
+            .strings
+            .iter()
             .filter(|s| !fp1.strings.iter().any(|s1| s1.value == s.value))
             .map(|s| (s.value.clone(), format!("{:?}", s.context)))
             .collect();
-        
+
         let unique_to_func1 = UniqueElements {
             strings: unique_strings1,
             constants: Vec::new(), // TODO: implement
             api_calls: Vec::new(), // TODO: implement
         };
-        
+
         let unique_to_func2 = UniqueElements {
             strings: unique_strings2,
             constants: Vec::new(), // TODO: implement
             api_calls: Vec::new(), // TODO: implement
         };
-        
+
         // Size analysis
         let size_ratio = decl2.size as f64 / decl1.size as f64;
         let interpretation = if size_ratio > 1.2 {
@@ -1285,14 +1551,15 @@ impl StructuralDiff {
             "significantly reduced"
         } else {
             "similar size"
-        }.to_string();
-        
+        }
+        .to_string();
+
         let total_score = string_matches.iter().map(|s| s.contribution).sum::<f64>()
             + constant_matches.iter().map(|c| c.contribution).sum::<f64>()
             + api_matches.iter().map(|a| a.contribution).sum::<f64>();
-            
+
         let evidence_count = string_matches.len() + constant_matches.len() + api_matches.len();
-        
+
         EvidenceBreakdown {
             total_score,
             evidence_count,
