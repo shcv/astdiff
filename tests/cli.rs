@@ -111,15 +111,19 @@ fn dump_with_an_empty_side_loads_and_queries_without_panicking() {
     std::fs::write(&old, "function removed(){return 1}").unwrap();
     std::fs::write(&new, "").unwrap();
 
-    assert!(command()
+    let create = command()
         .arg(&old)
         .arg(&new)
         .arg("--compact")
         .arg("--dump")
         .arg(&dump)
-        .status()
-        .unwrap()
-        .success());
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
     let query = command()
         .arg("query")
         .arg(&dump)

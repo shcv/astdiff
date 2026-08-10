@@ -24,8 +24,8 @@ fn compare(old: &str, new: &str) -> DiffResult {
 #[test]
 fn one_line_bundle_uses_declaration_byte_ranges() {
     let result = compare(
-        "function a(){return 1}function b(){return 2}",
-        "function a(){return 1}function b(){return 3}",
+        include_str!("../fixtures/regressions/one-line-old.js"),
+        include_str!("../fixtures/regressions/one-line-new.js"),
     );
 
     assert_eq!(result.changes.len(), 1);
@@ -36,7 +36,10 @@ fn one_line_bundle_uses_declaration_byte_ranges() {
 
 #[test]
 fn keyword_literals_are_not_normalized_as_identifiers() {
-    let result = compare("function a(){return true}", "function a(){return null}");
+    let result = compare(
+        include_str!("../fixtures/regressions/keyword-old.js"),
+        include_str!("../fixtures/regressions/keyword-new.js"),
+    );
 
     assert!(!result.identical);
     assert_eq!(result.changes.len(), 1);
@@ -44,6 +47,19 @@ fn keyword_literals_are_not_normalized_as_identifiers() {
         result.changes[0].classification,
         Some(DiffClassification::Structural)
     );
+}
+
+#[test]
+fn bundled_module_table_change_is_not_lost() {
+    let result = compare(
+        include_str!("../fixtures/regressions/bundle-old.js"),
+        include_str!("../fixtures/regressions/bundle-new.js"),
+    );
+
+    assert!(!result.identical);
+    assert_eq!(result.matched_declarations, 1);
+    assert_eq!(result.changes.len(), 1);
+    assert_eq!(result.changes[0].structural_path, "global.modules");
 }
 
 #[test]
