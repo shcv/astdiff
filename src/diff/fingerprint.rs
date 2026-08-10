@@ -700,7 +700,7 @@ impl RarityScorer {
 }
 
 thread_local! {
-    static API_KEY_BUF: RefCell<String> = RefCell::new(String::new());
+    static API_KEY_BUF: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 pub fn calculate_fingerprint_similarity(
