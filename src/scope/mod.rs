@@ -49,6 +49,12 @@ pub struct ScopeAnalyzer {
     scope_counter: usize,
 }
 
+impl Default for ScopeAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScopeAnalyzer {
     pub fn new() -> Self {
         let mut scopes = HashMap::new();
@@ -528,77 +534,74 @@ impl ScopeAnalyzer {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                match child.kind() {
-                    "import_clause" => {
-                        // Handle various import forms
-                        let mut clause_cursor = child.walk();
-                        if clause_cursor.goto_first_child() {
-                            loop {
-                                let import_child = clause_cursor.node();
-                                match import_child.kind() {
-                                    "identifier" => {
-                                        // default import
-                                        let import_name = &source[import_child.byte_range()];
-                                        self.add_variable_to_current_scope(
-                                            import_name.to_string(),
-                                            VariableKind::Const,
-                                            import_child.start_position(),
-                                            import_child.start_byte(),
-                                            false,
-                                        );
+                if child.kind() == "import_clause" {
+                    // Handle various import forms
+                    let mut clause_cursor = child.walk();
+                    if clause_cursor.goto_first_child() {
+                        loop {
+                            let import_child = clause_cursor.node();
+                            match import_child.kind() {
+                                "identifier" => {
+                                    // default import
+                                    let import_name = &source[import_child.byte_range()];
+                                    self.add_variable_to_current_scope(
+                                        import_name.to_string(),
+                                        VariableKind::Const,
+                                        import_child.start_position(),
+                                        import_child.start_byte(),
+                                        false,
+                                    );
+                                }
+                                "namespace_import" => {
+                                    // import * as name
+                                    // The identifier is the third child (after * and as)
+                                    if let Some(identifier) = import_child.child(2) {
+                                        if identifier.kind() == "identifier" {
+                                            let import_name = &source[identifier.byte_range()];
+                                            self.add_variable_to_current_scope(
+                                                import_name.to_string(),
+                                                VariableKind::Const,
+                                                identifier.start_position(),
+                                                identifier.start_byte(),
+                                                false,
+                                            );
+                                        }
                                     }
-                                    "namespace_import" => {
-                                        // import * as name
-                                        // The identifier is the third child (after * and as)
-                                        if let Some(identifier) = import_child.child(2) {
-                                            if identifier.kind() == "identifier" {
-                                                let import_name = &source[identifier.byte_range()];
+                                }
+                                "named_imports" => {
+                                    // import { a, b as c }
+                                    for j in 0..import_child.child_count() {
+                                        if let Some(import_spec) = import_child.child(j) {
+                                            if import_spec.kind() == "import_specifier" {
+                                                let name = if let Some(alias) =
+                                                    import_spec.child_by_field_name("alias")
+                                                {
+                                                    &source[alias.byte_range()]
+                                                } else if let Some(name) =
+                                                    import_spec.child_by_field_name("name")
+                                                {
+                                                    &source[name.byte_range()]
+                                                } else {
+                                                    continue;
+                                                };
                                                 self.add_variable_to_current_scope(
-                                                    import_name.to_string(),
+                                                    name.to_string(),
                                                     VariableKind::Const,
-                                                    identifier.start_position(),
-                                                    identifier.start_byte(),
+                                                    import_spec.start_position(),
+                                                    import_spec.start_byte(),
                                                     false,
                                                 );
                                             }
                                         }
                                     }
-                                    "named_imports" => {
-                                        // import { a, b as c }
-                                        for j in 0..import_child.child_count() {
-                                            if let Some(import_spec) = import_child.child(j) {
-                                                if import_spec.kind() == "import_specifier" {
-                                                    let name = if let Some(alias) =
-                                                        import_spec.child_by_field_name("alias")
-                                                    {
-                                                        &source[alias.byte_range()]
-                                                    } else if let Some(name) =
-                                                        import_spec.child_by_field_name("name")
-                                                    {
-                                                        &source[name.byte_range()]
-                                                    } else {
-                                                        continue;
-                                                    };
-                                                    self.add_variable_to_current_scope(
-                                                        name.to_string(),
-                                                        VariableKind::Const,
-                                                        import_spec.start_position(),
-                                                        import_spec.start_byte(),
-                                                        false,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                    _ => {}
                                 }
-                                if !clause_cursor.goto_next_sibling() {
-                                    break;
-                                }
+                                _ => {}
+                            }
+                            if !clause_cursor.goto_next_sibling() {
+                                break;
                             }
                         }
                     }
-                    _ => {}
                 }
 
                 if !cursor.goto_next_sibling() {
@@ -722,17 +725,13 @@ impl ScopeAnalyzer {
     pub fn find_variable(&self, name: &str, from_scope_id: &str) -> Option<(String, &Variable)> {
         let mut current_scope_id = from_scope_id;
 
-        loop {
-            if let Some(scope) = self.scopes.get(current_scope_id) {
-                if let Some(var) = scope.variables.iter().find(|v| v.name == name) {
-                    return Some((current_scope_id.to_string(), var));
-                }
+        while let Some(scope) = self.scopes.get(current_scope_id) {
+            if let Some(var) = scope.variables.iter().find(|v| v.name == name) {
+                return Some((current_scope_id.to_string(), var));
+            }
 
-                if let Some(parent) = &scope.parent {
-                    current_scope_id = parent;
-                } else {
-                    break;
-                }
+            if let Some(parent) = &scope.parent {
+                current_scope_id = parent;
             } else {
                 break;
             }

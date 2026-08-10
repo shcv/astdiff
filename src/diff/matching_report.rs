@@ -296,10 +296,7 @@ impl MatchingReportBuilder {
         // Analyze scores by evidence count
         let mut by_evidence: HashMap<usize, Vec<f64>> = HashMap::new();
         for (_, _, score, evidence) in &self.all_scores {
-            by_evidence
-                .entry(*evidence)
-                .or_insert_with(Vec::new)
-                .push(*score);
+            by_evidence.entry(*evidence).or_default().push(*score);
         }
 
         for (evidence_count, scores) in by_evidence {
@@ -464,9 +461,9 @@ pub fn generate_markdown_report(report: &MatchingReport) -> String {
                     }
                     md.push_str(&format!("`{}`", s.value));
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
-            md.push_str("\n");
+            md.push('\n');
         }
     }
 
@@ -532,9 +529,9 @@ pub fn generate_markdown_report(report: &MatchingReport) -> String {
                     for me in &best.missing_evidence {
                         md.push_str(&format!("`{}` ", me));
                     }
-                    md.push_str("\n");
+                    md.push('\n');
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
     }
@@ -548,7 +545,6 @@ pub fn generate_llm_config_update(report: &MatchingReport) -> String {
         "threshold_adjustments": report.statistics.threshold_effectiveness.suggested_adjustments,
         "high_value_strings": report.statistics.string_importance.iter()
             .filter(|(_, &imp)| imp > 1.0)
-            .map(|(s, imp)| (s, imp))
             .collect::<Vec<_>>(),
         "borderline_verifications_needed": report.borderline_cases.iter()
             .map(|c| {

@@ -216,9 +216,9 @@ fn extract_module_string(s: &str) -> Option<String> {
 fn strip_declaration_keyword(line: &str) -> String {
     let trimmed = line.trim_start();
     for keyword in &["var ", "let ", "const "] {
-        if trimmed.starts_with(keyword) {
+        if let Some(remainder) = trimmed.strip_prefix(keyword) {
             let indent_len = line.len() - trimmed.len();
-            return format!("{}{}", &line[..indent_len], &trimmed[keyword.len()..]);
+            return format!("{}{}", &line[..indent_len], remainder);
         }
     }
     line.to_string()
@@ -284,10 +284,10 @@ pub fn classify_diff_lines(diff_text: &str) -> super::DiffClassification {
     }
 
     // Process final block
-    if !removed_lines.is_empty() || !added_lines.is_empty() {
-        if !blocks_are_string_only(&removed_lines, &added_lines) {
-            return super::DiffClassification::Structural;
-        }
+    if (!removed_lines.is_empty() || !added_lines.is_empty())
+        && !blocks_are_string_only(&removed_lines, &added_lines)
+    {
+        return super::DiffClassification::Structural;
     }
 
     super::DiffClassification::StringOnly
@@ -439,13 +439,13 @@ impl<'a> FingerprintExtractor<'a> {
                         constants.push(ConstantFingerprint {
                             value: ConstantValue::Duration(num as u64),
                         });
-                    } else if num > 100 || num < -100 {
+                    } else if !(-100..=100).contains(&num) {
                         // Only track non-trivial numbers
                         constants.push(ConstantFingerprint {
                             value: ConstantValue::Number(num),
                         });
                     }
-                } else if let Ok(_) = self.source[node.byte_range()].parse::<f64>() {
+                } else if self.source[node.byte_range()].parse::<f64>().is_ok() {
                     constants.push(ConstantFingerprint {
                         value: ConstantValue::Float(self.source[node.byte_range()].to_string()),
                     });
@@ -635,6 +635,12 @@ pub struct RarityScorer {
     string_counts: HashMap<String, usize>,
     constant_counts: HashMap<ConstantValue, usize>,
     api_counts: HashMap<String, usize>,
+}
+
+impl Default for RarityScorer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RarityScorer {

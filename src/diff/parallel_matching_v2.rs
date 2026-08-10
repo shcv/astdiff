@@ -100,6 +100,7 @@ impl ParallelMatcherV2 {
         }
     }
 
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn match_declarations(
         &self,
         decls1: &[DeclarationData],
@@ -342,6 +343,7 @@ impl ParallelMatcherV2 {
         results
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn parallel_full_similarity(
         &self,
         candidates: &[CandidateMatch],
@@ -442,6 +444,7 @@ impl ParallelMatcherV2 {
         results
     }
 
+    #[allow(clippy::type_complexity)]
     fn resolve_best_matches(
         &self,
         mut results: Vec<SimilarityResult>,
@@ -553,9 +556,8 @@ impl ParallelMatcherV2 {
             }
 
             // Generate display diff using comparison normalization for LCS alignment
-            let display_diff = StructuralDiff::generate_normalized_display_diff(
-                &src1, &src2, &comp_s1, &comp_s2, 3,
-            );
+            let display_diff =
+                StructuralDiff::generate_normalized_display_diff(src1, src2, &comp_s1, &comp_s2, 3);
 
             if display_diff.is_empty() {
                 unchanged_count += 1;
@@ -686,7 +688,7 @@ fn estimate_minhash_similarity(sig1: &[u64], sig2: &[u64]) -> f64 {
 fn passes_lsh_gate(sig1: &[u64], sig2: &[u64]) -> bool {
     let blocked = sig1.len() == MINHASH_LANES
         && sig2.len() == MINHASH_LANES
-        && MINHASH_LANES % LSH_GATE_BLOCK_LANES == 0;
+        && MINHASH_LANES.is_multiple_of(LSH_GATE_BLOCK_LANES);
 
     if !blocked {
         return estimate_minhash_similarity(sig1, sig2) >= LSH_SIMILARITY_THRESHOLD;
@@ -750,6 +752,7 @@ fn create_change(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_classified_change(
     change_type: ChangeType,
     location1: Option<super::Location>,

@@ -52,10 +52,7 @@ impl MappingGenerator {
             {
                 // Group by scope and original name to handle variables with same name in different scopes
                 let key = (identifier.scope_id.clone(), identifier.text.clone());
-                identifier_groups
-                    .entry(key)
-                    .or_insert_with(Vec::new)
-                    .push(identifier);
+                identifier_groups.entry(key).or_default().push(identifier);
             }
         }
 

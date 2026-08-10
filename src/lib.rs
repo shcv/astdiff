@@ -33,14 +33,16 @@ pub fn run(args: Args) -> Result<()> {
         } => run_diff(
             file1,
             file2,
-            format,
-            export_mappings,
-            summary,
-            verbose,
-            fingerprints,
-            compact,
-            lite,
-            dump,
+            DiffOptions {
+                format,
+                export_mappings,
+                summary,
+                verbose,
+                fingerprints,
+                compact,
+                lite,
+                dump,
+            },
         ),
         Mode::Canonicalize {
             input_file,
@@ -182,9 +184,7 @@ fn run_apply_mapping(
     Ok(())
 }
 
-fn run_diff(
-    file1: std::path::PathBuf,
-    file2: std::path::PathBuf,
+struct DiffOptions {
     format: String,
     export_mappings: Option<std::path::PathBuf>,
     summary: bool,
@@ -193,7 +193,24 @@ fn run_diff(
     compact: bool,
     lite: bool,
     dump: Option<std::path::PathBuf>,
+}
+
+fn run_diff(
+    file1: std::path::PathBuf,
+    file2: std::path::PathBuf,
+    options: DiffOptions,
 ) -> Result<()> {
+    let DiffOptions {
+        format,
+        export_mappings,
+        summary,
+        verbose,
+        fingerprints,
+        compact,
+        lite,
+        dump,
+    } = options;
+
     use crate::diff::profiling::Timer;
     use crate::diff::StructuralDiff;
 
@@ -458,7 +475,7 @@ fn run_inspect(
                 // Only show if it wasn't already shown as a match
                 !matches1
                     .iter()
-                    .any(|(idx1, _)| match_map.get(idx1).map_or(false, |&i| i == *idx2))
+                    .any(|(idx1, _)| match_map.get(idx1).is_some_and(|&i| i == *idx2))
             })
             .collect();
 
@@ -480,7 +497,7 @@ fn run_inspect(
     Ok(())
 }
 
-fn run_query(dump_file: &std::path::PathBuf, query_type: QueryType) -> Result<()> {
+fn run_query(dump_file: &std::path::Path, query_type: QueryType) -> Result<()> {
     use crate::dump::AstDiffDump;
 
     // Load the dump
@@ -527,9 +544,7 @@ fn run_query(dump_file: &std::path::PathBuf, query_type: QueryType) -> Result<()
             for decl in unmatched {
                 println!(
                     "  - {} (line {}): {}",
-                    decl.decl.name,
-                    decl.decl.line,
-                    decl.decl.kind.to_string()
+                    decl.decl.name, decl.decl.line, decl.decl.kind
                 );
             }
         }
@@ -543,9 +558,7 @@ fn run_query(dump_file: &std::path::PathBuf, query_type: QueryType) -> Result<()
             for decl in unmatched {
                 println!(
                     "  - {} (line {}): {}",
-                    decl.decl.name,
-                    decl.decl.line,
-                    decl.decl.kind.to_string()
+                    decl.decl.name, decl.decl.line, decl.decl.kind
                 );
             }
         }
@@ -602,7 +615,7 @@ fn run_query(dump_file: &std::path::PathBuf, query_type: QueryType) -> Result<()
     Ok(())
 }
 
-fn run_load(dump_file: &std::path::PathBuf, format: &str) -> Result<()> {
+fn run_load(dump_file: &std::path::Path, format: &str) -> Result<()> {
     use crate::dump::AstDiffDump;
 
     // Load the dump
@@ -686,14 +699,4 @@ fn run_load(dump_file: &std::path::PathBuf, format: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_basic_functionality() {
-        // This is a placeholder test - in a real implementation,
-        // we'd have comprehensive tests for each component
-        assert!(true);
-    }
 }

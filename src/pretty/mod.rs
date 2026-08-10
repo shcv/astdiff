@@ -4,6 +4,12 @@ pub struct PrettyPrinter {
     indent_size: usize,
 }
 
+impl Default for PrettyPrinter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PrettyPrinter {
     pub fn new() -> Self {
         Self { indent_size: 2 }
@@ -40,7 +46,7 @@ impl PrettyPrinter {
                     self.format_node(params, source, depth, output);
                 }
 
-                output.push_str(" ");
+                output.push(' ');
 
                 if let Some(body) = node.child_by_field_name("body") {
                     self.format_node(body, source, depth, output);

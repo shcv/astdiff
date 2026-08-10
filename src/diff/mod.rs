@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use tree_sitter::{Node, Tree};
 
 pub mod fingerprint;
@@ -17,6 +18,12 @@ pub(crate) const MINHASH_LANES: usize = 128;
 /// Represents a structural diff between two JavaScript ASTs
 pub struct StructuralDiff {
     use_fingerprints: bool,
+}
+
+impl Default for StructuralDiff {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +306,7 @@ impl StructuralDiff {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn compare(
         &self,
         source1: &str,
@@ -420,6 +428,7 @@ impl StructuralDiff {
         declarations
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_declaration(
         &self,
         name: String,
@@ -615,7 +624,12 @@ impl StructuralDiff {
             }
             _ => {
                 // Only look for global declarations at the top level
-                if is_global && node == node.parent().map(|p| p.child(0)).flatten().unwrap_or(node)
+                if is_global
+                    && node
+                        == node
+                            .parent()
+                            .and_then(|parent| parent.child(0))
+                            .unwrap_or(node)
                 {
                     for child in node.children(&mut node.walk()) {
                         self.extract_declarations_recursive(
@@ -812,9 +826,9 @@ impl StructuralDiff {
         let mut signature = vec![u64::MAX; num_hashes];
 
         for &hash in hashes {
-            for i in 0..num_hashes {
+            for (i, slot) in signature.iter_mut().enumerate().take(num_hashes) {
                 let hash_value = self.hash_with_seed_u64(hash, i);
-                signature[i] = signature[i].min(hash_value);
+                *slot = (*slot).min(hash_value);
             }
         }
 
@@ -866,8 +880,8 @@ impl StructuralDiff {
     pub fn print_summary(
         &self,
         result: &DiffResult,
-        file1: &std::path::PathBuf,
-        file2: &std::path::PathBuf,
+        file1: &Path,
+        file2: &Path,
         source1: &str,
         source2: &str,
     ) {
@@ -1038,8 +1052,8 @@ impl StructuralDiff {
     pub fn print_default(
         &self,
         result: &DiffResult,
-        file1: &std::path::PathBuf,
-        file2: &std::path::PathBuf,
+        file1: &Path,
+        file2: &Path,
         source1: &str,
         source2: &str,
     ) -> Result<()> {
@@ -1176,12 +1190,7 @@ impl StructuralDiff {
     }
 
     /// Compact output: location-only summary grouped by classification.
-    pub fn print_compact_locations(
-        &self,
-        result: &DiffResult,
-        file1: &std::path::PathBuf,
-        file2: &std::path::PathBuf,
-    ) {
+    pub fn print_compact_locations(&self, result: &DiffResult, file1: &Path, file2: &Path) {
         let file1_name = file1
             .file_name()
             .unwrap_or(file1.as_os_str())
@@ -1294,8 +1303,8 @@ impl StructuralDiff {
     pub fn print_side_by_side(
         &self,
         result: &DiffResult,
-        file1: &std::path::PathBuf,
-        file2: &std::path::PathBuf,
+        file1: &Path,
+        file2: &Path,
         source1: &str,
         source2: &str,
     ) {
@@ -1321,6 +1330,7 @@ impl StructuralDiff {
             .collect()
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn match_declarations(
         &self,
         decls1: &[Declaration],

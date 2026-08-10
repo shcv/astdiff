@@ -107,7 +107,7 @@ impl Canonicalizer {
         &mut self,
         scope_id: &str,
         all_scopes: &HashMap<String, Scope>,
-        tree: &Tree,
+        _tree: &Tree,
         source: &str,
     ) -> Result<()> {
         let scope = all_scopes
@@ -151,7 +151,7 @@ impl Canonicalizer {
         }
 
         for child_scope_id in &scope.children {
-            self.canonicalize_scope(child_scope_id, all_scopes, tree, source)?;
+            self.canonicalize_scope(child_scope_id, all_scopes, _tree, source)?;
         }
 
         Ok(())
@@ -213,7 +213,7 @@ impl Canonicalizer {
                     .counters
                     .scope_counters
                     .entry(scope_id.to_string())
-                    .or_insert_with(ScopeLocalCounters::default);
+                    .or_default();
 
                 scope_counters.parameter_counter += 1;
                 format!("param_{}", scope_counters.parameter_counter)
@@ -224,7 +224,7 @@ impl Canonicalizer {
                     .counters
                     .scope_counters
                     .entry(scope_id.to_string())
-                    .or_insert_with(ScopeLocalCounters::default);
+                    .or_default();
 
                 scope_counters.variable_counter += 1;
                 format!("var_{}", scope_counters.variable_counter)
@@ -245,11 +245,11 @@ impl Canonicalizer {
         // Pre-compute all canonical names
         for identifier in &identifiers {
             let key = (identifier.scope_id.clone(), identifier.text.clone());
-            if !resolution_cache.contains_key(&key) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = resolution_cache.entry(key) {
                 if let Some(canonical) =
                     self.find_canonical_name(&identifier.text, &identifier.scope_id)
                 {
-                    resolution_cache.insert(key, canonical);
+                    entry.insert(canonical);
                 }
             }
         }
