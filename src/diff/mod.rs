@@ -12,6 +12,8 @@ pub mod profiling;
 use fingerprint::*;
 use matching_report::*;
 
+pub(crate) const MINHASH_LANES: usize = 128;
+
 /// Represents a structural diff between two JavaScript ASTs
 pub struct StructuralDiff {
     use_fingerprints: bool,
@@ -432,7 +434,7 @@ impl StructuralDiff {
         fingerprint: Option<FunctionFingerprint>,
     ) -> Declaration {
         let size = structural_hashes.len();
-        let minhash_signature = self.compute_minhash(&structural_hashes, 128);
+        let minhash_signature = self.compute_minhash(&structural_hashes, MINHASH_LANES);
 
         Declaration {
             name,

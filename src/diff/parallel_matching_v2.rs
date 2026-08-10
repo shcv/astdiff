@@ -2,12 +2,67 @@ use super::fingerprint::{
     self, calculate_fingerprint_similarity, FunctionFingerprint, RarityScorer,
 };
 use super::matching_report::EvidenceBreakdown;
-use super::{Change, ChangeType, DeclarationData, DeclarationKind, DiffClassification};
+use super::{
+    Change, ChangeType, DeclarationData, DeclarationKind, DiffClassification, MINHASH_LANES,
+};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Estimated MinHash similarity a pair must reach to survive the candidate filter.
+const LSH_SIMILARITY_THRESHOLD: f64 = 0.3;
+
+/// Lanes compared before the gate checks whether the pair is still reachable.
+///
+/// Must divide MINHASH_LANES, otherwise the tail lanes would go uncompared; the
+/// gate checks that at runtime and falls back to the general path if it ever stops
+/// holding.
+const LSH_GATE_BLOCK_LANES: usize = 32;
+
+/// Smallest number of agreeing lanes that clears LSH_SIMILARITY_THRESHOLD.
+///
+/// The gate is `matches / lanes >= threshold`. `matches` is a small integer and
+/// `lanes` is a power of two, so that quotient is exact in f64 and the comparison
+/// has a single integer crossing point: below it every pair fails, at or above it
+/// every pair passes. Finding that point once at compile time lets the hot loop
+/// count lanes and compare integers instead of dividing 230 million times, and it
+/// is the reason the loop can bail early: once the lanes still uncompared cannot
+/// carry the count this far, the pair is already rejected. For the current 128
+/// lanes and 0.3 threshold the point is 39, since 38/128 = 0.296875 fails and
+/// 39/128 = 0.3046875 passes.
+const LSH_MIN_MATCHING_LANES: usize = min_matching_lanes(MINHASH_LANES, LSH_SIMILARITY_THRESHOLD);
+
+const fn min_matching_lanes(lanes: usize, threshold: f64) -> usize {
+    let mut matching = 0;
+
+    while matching < lanes {
+        if matching as f64 / lanes as f64 >= threshold {
+            break;
+        }
+
+        matching += 1;
+    }
+
+    matching
+}
+
+/// One decls2 entry as the window scan sees it, in sorted2 order.
+///
+/// The scan touches this instead of the full DeclarationData, which is ~200 bytes
+/// and drags a String heap allocation in behind every probe. Everything the scan
+/// decides on lives here, so a rejected pair costs one sequential read.
+struct Decl2Probe {
+    size: usize,
+    name_id: u32,
+    i2: u32,
+    kind: DeclarationKind,
+    /// False when this declaration's signature is not MINHASH_LANES long, in which
+    /// case it has no slot in the flat signature buffer and the scan reads the
+    /// declaration's own signature.
+    has_flat_signature: bool,
+}
 
 /// A pair that survived LSH filtering.
 ///
@@ -116,6 +171,11 @@ impl ParallelMatcherV2 {
     /// Testing each pair as it is generated means only the survivors are ever
     /// stored, which is roughly a fifth of the pairs on real input.
     ///
+    /// The scan itself reads a flat copy of the decls2 signatures and a compact side
+    /// table, both laid out in the same size order the window walks, so a probe costs a
+    /// sequential read instead of a pointer chase into a 37k-allocation heap. Neither
+    /// copy changes any value the scan compares, only where it reads them from.
+    ///
     /// Output order is unchanged (i1 ascending, then decls2 in size order):
     /// resolve_best_matches sorts these by similarity with a stable sort, so the
     /// order here decides tie-breaks and therefore the final diff.
@@ -137,19 +197,81 @@ impl ParallelMatcherV2 {
             exact_names2.entry(&decl2.name).or_default().push(i2);
         }
 
+        // Names are interned across both files so the scan compares u32 ids instead of
+        // two String heap reads per probe. Ids come from one table over both inputs, so
+        // two names share an id exactly when the strings are equal, which is the test
+        // the id comparison replaces.
+        let name_capacity = decls1
+            .len()
+            .checked_add(decls2.len())
+            .expect("declaration count overflow");
+        let mut name_ids: HashMap<&str, u32> = HashMap::with_capacity(name_capacity);
+        let mut next_name_id: u32 = 0;
+
+        let name_ids1: Vec<u32> = decls1
+            .iter()
+            .map(|decl| {
+                *name_ids.entry(decl.name.as_str()).or_insert_with(|| {
+                    let id = next_name_id;
+                    next_name_id = next_name_id.checked_add(1).expect("too many unique names");
+                    id
+                })
+            })
+            .collect();
+
+        // Signatures are copied into one flat buffer in sorted2 order so the window scan
+        // reads them front to back. Each declaration otherwise owns its own ~1 KB
+        // allocation, which turns the scan into one random pointer chase per probe over a
+        // working set far larger than cache.
+        let signature_capacity = sorted2
+            .len()
+            .checked_mul(MINHASH_LANES)
+            .expect("MinHash signature capacity overflow");
+        let mut flat_signatures: Vec<u64> = Vec::with_capacity(signature_capacity);
+        let mut probes: Vec<Decl2Probe> = Vec::with_capacity(sorted2.len());
+
+        for &(i2, size) in &sorted2 {
+            let decl2 = &decls2[i2];
+            let has_flat_signature = decl2.minhash_signature.len() == MINHASH_LANES;
+
+            // The stride stays fixed so `idx` alone locates a signature; an odd-length
+            // signature keeps its slot as padding and is read from the declaration.
+            if has_flat_signature {
+                flat_signatures.extend_from_slice(&decl2.minhash_signature);
+            } else {
+                flat_signatures.resize(flat_signatures.len() + MINHASH_LANES, 0);
+            }
+
+            let name_id = *name_ids.entry(decl2.name.as_str()).or_insert_with(|| {
+                let id = next_name_id;
+                next_name_id = next_name_id.checked_add(1).expect("too many unique names");
+                id
+            });
+
+            probes.push(Decl2Probe {
+                size,
+                name_id,
+                i2: u32::try_from(i2).expect("astdiff supports at most u32::MAX declarations"),
+                kind: decl2.kind.clone(),
+                has_flat_signature,
+            });
+        }
+
         let examined = AtomicUsize::new(0);
         let last_update = Mutex::new(Instant::now());
 
         let results: Vec<CandidateMatch> = decls1
             .par_iter()
             .enumerate()
-            .flat_map_iter(|(i1, decl1)| {
-                let i1 = u32::try_from(i1).expect("astdiff supports at most u32::MAX declarations");
+            .flat_map_iter(|(i1_usize, decl1)| {
+                let i1 = u32::try_from(i1_usize)
+                    .expect("astdiff supports at most u32::MAX declarations");
                 let min_size = ((decl1.size as f64) * 0.5).max(1.0) as usize;
                 let max_size = ((decl1.size as f64) * 1.5) as usize;
+                let name_id1 = name_ids1[i1_usize];
 
                 // Binary search for window start
-                let start_idx = sorted2.partition_point(|(_, size)| *size < min_size);
+                let start_idx = probes.partition_point(|probe| probe.size < min_size);
 
                 let mut local_results = Vec::new();
                 let mut local_examined = 0usize;
@@ -170,28 +292,28 @@ impl ParallelMatcherV2 {
                     }
                 }
 
-                for &(i2, size2) in sorted2.iter().skip(start_idx) {
-                    if size2 > max_size {
+                for (idx, probe) in probes.iter().enumerate().skip(start_idx) {
+                    if probe.size > max_size {
                         break;
                     }
 
-                    let decl2 = &decls2[i2];
-                    if decl1.name == decl2.name || !kinds_are_compatible(&decl1.kind, &decl2.kind) {
+                    if name_id1 == probe.name_id || !kinds_are_compatible(&decl1.kind, &probe.kind)
+                    {
                         continue;
                     }
 
                     local_examined += 1;
 
-                    let lsh_sim = estimate_minhash_similarity(
-                        &decl1.minhash_signature,
-                        &decl2.minhash_signature,
-                    );
+                    let sig2: &[u64] = if probe.has_flat_signature {
+                        &flat_signatures[idx * MINHASH_LANES..(idx + 1) * MINHASH_LANES]
+                    } else {
+                        &decls2[probe.i2 as usize].minhash_signature
+                    };
 
-                    if lsh_sim >= 0.3 {
+                    if passes_lsh_gate(&decl1.minhash_signature, sig2) {
                         local_results.push(CandidateMatch {
                             i1,
-                            i2: u32::try_from(i2)
-                                .expect("astdiff supports at most u32::MAX declarations"),
+                            i2: probe.i2,
                             name_match: false,
                         });
                     }
@@ -551,6 +673,43 @@ fn estimate_minhash_similarity(sig1: &[u64], sig2: &[u64]) -> f64 {
     matches as f64 / sig1.len() as f64
 }
 
+/// Whether a pair's MinHash signatures agree on enough lanes to stay a candidate.
+///
+/// Equivalent to `estimate_minhash_similarity(sig1, sig2) >= LSH_SIMILARITY_THRESHOLD`,
+/// but it never finishes counting a pair that has already lost: after each block the
+/// lanes still uncompared are added to the count as if all of them agreed, and if even
+/// that best case falls short the pair is rejected. On real input most pairs die in the
+/// first block, which is most of the 230 million pair scan.
+///
+/// Signatures of any other length go through the original division, so a future change
+/// to the lane count cannot silently change which pairs survive.
+fn passes_lsh_gate(sig1: &[u64], sig2: &[u64]) -> bool {
+    let blocked = sig1.len() == MINHASH_LANES
+        && sig2.len() == MINHASH_LANES
+        && MINHASH_LANES % LSH_GATE_BLOCK_LANES == 0;
+
+    if !blocked {
+        return estimate_minhash_similarity(sig1, sig2) >= LSH_SIMILARITY_THRESHOLD;
+    }
+
+    let mut matching = 0usize;
+    let mut uncompared = MINHASH_LANES;
+
+    for (block1, block2) in sig1
+        .chunks_exact(LSH_GATE_BLOCK_LANES)
+        .zip(sig2.chunks_exact(LSH_GATE_BLOCK_LANES))
+    {
+        matching += block1.iter().zip(block2).filter(|(a, b)| a == b).count();
+        uncompared -= LSH_GATE_BLOCK_LANES;
+
+        if matching + uncompared < LSH_MIN_MATCHING_LANES {
+            return false;
+        }
+    }
+
+    matching >= LSH_MIN_MATCHING_LANES
+}
+
 fn should_match_with_score(similarity: f64, evidence_count: usize, size: usize) -> bool {
     if evidence_count > 0 {
         match evidence_count {
@@ -643,5 +802,35 @@ fn kind_to_string(kind: &DeclarationKind) -> &'static str {
         DeclarationKind::Variable => "variable",
         DeclarationKind::Import => "import",
         DeclarationKind::Export => "export",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signatures_with_matches(matches: usize, lanes: usize) -> (Vec<u64>, Vec<u64>) {
+        let left: Vec<u64> = (0..lanes as u64).collect();
+        let mut right = left.clone();
+        for value in &mut right[matches..] {
+            *value += lanes as u64;
+        }
+        (left, right)
+    }
+
+    #[test]
+    fn lsh_gate_has_the_same_128_lane_threshold() {
+        let (left, right) = signatures_with_matches(38, MINHASH_LANES);
+        assert!(!passes_lsh_gate(&left, &right));
+        let (left, right) = signatures_with_matches(39, MINHASH_LANES);
+        assert!(passes_lsh_gate(&left, &right));
+    }
+
+    #[test]
+    fn lsh_gate_falls_back_for_nonstandard_signature_lengths() {
+        let (left, right) = signatures_with_matches(3, 10);
+        assert!(passes_lsh_gate(&left, &right));
+        let (left, right) = signatures_with_matches(2, 10);
+        assert!(!passes_lsh_gate(&left, &right));
     }
 }
