@@ -1,0 +1,41 @@
+#+TITLE: Positioned Source Map v3 Sidecar
+#+OPTIONS: toc:2
+
+* Scope
+
+The =.astsm= sidecar is the =astdiff.sourcemap.v3.positioned= persistence
+profile for a parsed basic Source Map v3 map.  It is separate from the
+=astdiff.analysis.v1= artifact.  The normal Source Map parser and lookup
+remain the source of map semantics; the sidecar only stores a verified,
+columnar projection of a basic map.
+
+The payload has fixed metadata, an indexed UTF-8 string repetition, one line
+first/count table, and parallel fixed-width segment columns.  A verified mmap
+reader can obtain a line slice in O(1) and binary-search a line in O(log n).
+Opening checks the exact Isoform layout hash, the raw map digest, the
+normalized positioned payload digest, and the generated-source digest in the
+160-byte =ASTSM= envelope.  Verification then checks UTF-8, count and slice
+relationships, source/name row references, nullable source rows, and mapped
+versus unmapped segment invariants.
+
+* Indexed maps
+
+Indexed maps remain valid inputs to =SourceMap::parse= and ordinary lookup.
+They are rejected by =SourceMap::encode_positioned= in this profile:
+section offsets do not fit one canonical first line/segment slice without a
+flattening policy.  The error names this condition and asks callers to
+flatten the map before writing =.astsm=.  A future profile may define an
+explicit section table and a different lookup contract.
+
+* Limits and generation
+
+The default sidecar limits are 4 GiB payload bytes, 20 million generated
+lines, 100 million segments, 2 million indexed strings, and 256 MiB of
+string bytes.  They are enforced both while encoding and before exposing a
+verified view.  Schema JSON is canonical at =schemas/sourcemap-v3.json=;
+=schemas/sourcemap-v3.isf= is generated and checked with
+=tools/sourcemap-schema.sh=.  Run:
+
+#+begin_src sh
+tools/sourcemap-schema.sh check
+#+end_src

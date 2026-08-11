@@ -31,6 +31,10 @@ zstd = "0.13"
 sha2 = "0.10"
 chrono = "0.4"
 similar = "2.4"
+# Joint-development dependency; the checked-in schema artifact is generated
+# with the schema-artifact version in this checkout.
+isoform = { path = "../isoform/rust/isoform", features = ["hash"] }
+memmap2 = "0.9"
 
 [dev-dependencies]
 tempfile = "3.10"

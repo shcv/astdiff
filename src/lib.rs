@@ -1,17 +1,22 @@
+pub mod analysis;
 pub mod canonicalizer;
 pub mod cli;
 pub mod diff;
 pub mod dump;
+pub mod lineage;
 pub mod mapping;
+pub mod naming;
 pub mod parser;
 pub mod pretty;
 pub mod scope;
+pub mod sourcemap;
 
 use anyhow::Result;
 use std::fs;
+use std::io::Read;
 
 use canonicalizer::Canonicalizer;
-pub use cli::{Args, Mode, QueryType};
+pub use cli::{AnalysisQuery, Args, Mode, NameCommand, QueryType, SourceMapCommand};
 use mapping::MappingGenerator;
 use parser::JsParser;
 use pretty::PrettyPrinter;
@@ -19,6 +24,34 @@ use scope::ScopeAnalyzer;
 
 pub fn run(args: Args) -> Result<()> {
     match args.mode() {
+        Mode::Map(command) => run_source_map(command),
+        Mode::Lineage {
+            source_file,
+            target_file,
+            source_map_source,
+            source_map_target,
+            allow_sources_content,
+            output,
+            min_score_bps,
+            min_margin_bps,
+            max_candidates,
+        } => run_lineage(LineageRunOptions {
+            source_file: &source_file,
+            target_file: &target_file,
+            output: &output,
+            source_map_source: source_map_source.as_deref(),
+            source_map_target: source_map_target.as_deref(),
+            allow_sources_content,
+            min_score_bps,
+            min_margin_bps,
+            max_candidates,
+        }),
+        Mode::Names(command) => run_names(command),
+        Mode::Analyze { input_file, output } => run_analyze(&input_file, &output),
+        Mode::Analysis {
+            analysis_file,
+            query,
+        } => run_analysis_query(&analysis_file, query),
         Mode::Diff {
             file1,
             file2,
@@ -82,6 +115,589 @@ pub fn run(args: Args) -> Result<()> {
         } => run_query(&dump_file, query_type),
         Mode::Load { dump_file, format } => run_load(&dump_file, &format),
     }
+}
+
+fn run_source_map(command: SourceMapCommand) -> Result<()> {
+    use sourcemap::{GeneratedPosition, SourceMap, SourceMapLimits};
+
+    let parse = |path: &std::path::Path, allow_sources_content: bool| -> Result<SourceMap> {
+        let limits = SourceMapLimits {
+            allow_sources_content,
+            ..SourceMapLimits::default()
+        };
+        let bytes = read_bounded_file(path, limits.max_bytes as u64, "source map")?;
+        SourceMap::parse(&bytes, limits)
+    };
+    match command {
+        SourceMapCommand::Validate {
+            map_file,
+            allow_sources_content,
+        } => {
+            let map = parse(&map_file, allow_sources_content)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "valid": true,
+                    "version": 3,
+                    "coordinate_basis": "zero_based_utf16",
+                    "map_digest": analysis::StableId(map.digest()).to_hex(),
+                    "segments": map.segment_count(),
+                })
+            );
+        }
+        SourceMapCommand::Lookup {
+            map_file,
+            line,
+            column,
+            allow_sources_content,
+            include_source_names,
+        } => {
+            let map = parse(&map_file, allow_sources_content)?;
+            println!(
+                "{}",
+                source_map_positions_json(
+                    map.lookup_all(GeneratedPosition { line, column }),
+                    include_source_names,
+                )
+            );
+        }
+        SourceMapCommand::ComposeLookup {
+            outer_map,
+            inner_map,
+            line,
+            column,
+            allow_sources_content,
+            include_source_names,
+        } => {
+            let outer = parse(&outer_map, allow_sources_content)?;
+            let inner = parse(&inner_map, allow_sources_content)?;
+            println!(
+                "{}",
+                source_map_positions_json(
+                    SourceMap::compose_lookup_all(
+                        &outer,
+                        &inner,
+                        GeneratedPosition { line, column },
+                    ),
+                    include_source_names,
+                )
+            );
+        }
+        SourceMapCommand::Cache {
+            map_file,
+            generated_file,
+            output,
+            allow_sources_content,
+        } => {
+            let map = parse(&map_file, allow_sources_content)?;
+            let generated =
+                read_bounded_file(&generated_file, 512 * 1024 * 1024, "generated source")?;
+            map.write_positioned(&output, &generated)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "cached": true,
+                    "segments": map.segment_count(),
+                    "map_digest": analysis::StableId(map.digest()).to_hex(),
+                })
+            );
+        }
+        SourceMapCommand::CacheValidate {
+            cache_file,
+            generated_file,
+        } => {
+            let generated =
+                read_bounded_file(&generated_file, 512 * 1024 * 1024, "generated source")?;
+            let mapped =
+                sourcemap::cache::MappedSourceMap::open_for_source(&cache_file, &generated)?;
+            let view = mapped.verify()?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "valid": true,
+                    "sources": view.source_count(),
+                    "names": view.name_count(),
+                    "lines": view.line_count(),
+                    "segments": view.segment_count(),
+                    "map_digest": analysis::StableId(view.raw_map_digest()).to_hex(),
+                })
+            );
+        }
+        SourceMapCommand::CacheLookup {
+            cache_file,
+            generated_file,
+            line,
+            column,
+            include_source_names,
+        } => {
+            let generated =
+                read_bounded_file(&generated_file, 512 * 1024 * 1024, "generated source")?;
+            let mapped =
+                sourcemap::cache::MappedSourceMap::open_for_source(&cache_file, &generated)?;
+            let view = mapped.verify()?;
+            println!(
+                "{}",
+                source_map_positions_json(
+                    view.lookup_all(GeneratedPosition { line, column }),
+                    include_source_names,
+                )
+            );
+        }
+    }
+    Ok(())
+}
+
+fn read_bounded_file(path: &std::path::Path, max_bytes: u64, label: &str) -> Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        anyhow::bail!("{label} exceeds the byte limit");
+    }
+    Ok(bytes)
+}
+
+fn source_map_positions_json(
+    positions: Vec<sourcemap::OriginalPosition>,
+    include_source_names: bool,
+) -> serde_json::Value {
+    let mut values = positions
+        .into_iter()
+        .map(|position| {
+            let mut value = serde_json::json!({
+                "source_index": position.source_index,
+                "original_line": position.line,
+                "original_column": position.column,
+                "name_index": position.name_index,
+            });
+            if include_source_names {
+                value["source"] = position
+                    .source
+                    .map_or(serde_json::Value::Null, serde_json::Value::String);
+                value["source_root"] = position
+                    .source_root
+                    .map_or(serde_json::Value::Null, serde_json::Value::String);
+                value["name"] = position
+                    .name
+                    .map_or(serde_json::Value::Null, serde_json::Value::String);
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    match values.len() {
+        0 => serde_json::json!({
+            "mapping": "unmapped",
+            "coordinate_basis": "zero_based_utf16",
+        }),
+        1 => {
+            let mut value = values.pop().expect("one position exists");
+            value["mapping"] = serde_json::Value::String("mapped".to_string());
+            value["coordinate_basis"] = serde_json::Value::String("zero_based_utf16".to_string());
+            value
+        }
+        _ => serde_json::json!({
+            "mapping": "ambiguous",
+            "coordinate_basis": "zero_based_utf16",
+            "count": values.len(),
+            "positions": values,
+        }),
+    }
+}
+
+fn analyze_source(path: &std::path::Path) -> Result<analysis::Analysis> {
+    let source = fs::read_to_string(path)?;
+    let mut parser = JsParser::new()?;
+    let tree = parser.parse(&source)?;
+    analysis::Analysis::from_javascript(&source, &tree)
+}
+
+fn read_source_map_for_lineage(
+    path: &std::path::Path,
+    allow_sources_content: bool,
+) -> Result<sourcemap::SourceMap> {
+    let limits = sourcemap::SourceMapLimits {
+        allow_sources_content,
+        ..sourcemap::SourceMapLimits::default()
+    };
+    let bytes = read_bounded_file(path, limits.max_bytes as u64, "source map")?;
+    sourcemap::SourceMap::parse(&bytes, limits)
+}
+
+struct LineageRunOptions<'a> {
+    source_file: &'a std::path::Path,
+    target_file: &'a std::path::Path,
+    output: &'a std::path::Path,
+    source_map_source: Option<&'a std::path::Path>,
+    source_map_target: Option<&'a std::path::Path>,
+    allow_sources_content: bool,
+    min_score_bps: u32,
+    min_margin_bps: u32,
+    max_candidates: usize,
+}
+
+fn run_lineage(options: LineageRunOptions<'_>) -> Result<()> {
+    if options.source_map_source.is_some() != options.source_map_target.is_some() {
+        anyhow::bail!("--source-map-source and --source-map-target must be supplied together");
+    }
+    let source = analyze_source(options.source_file)?;
+    let target = analyze_source(options.target_file)?;
+    let config = lineage::MatcherConfig {
+        min_score_bps: options.min_score_bps,
+        min_margin_bps: options.min_margin_bps,
+        max_candidates: options.max_candidates,
+        ..lineage::MatcherConfig::default()
+    };
+    let report = match (options.source_map_source, options.source_map_target) {
+        (Some(source_map_path), Some(target_map_path)) => {
+            let source_text = fs::read_to_string(options.source_file)?;
+            let target_text = fs::read_to_string(options.target_file)?;
+            let source_map =
+                read_source_map_for_lineage(source_map_path, options.allow_sources_content)?;
+            let target_map =
+                read_source_map_for_lineage(target_map_path, options.allow_sources_content)?;
+            lineage::match_analyses_with_source_maps(
+                &source,
+                &target,
+                config,
+                &source_text,
+                &target_text,
+                &source_map,
+                &target_map,
+            )?
+        }
+        (None, None) => lineage::match_analyses(&source, &target, config)?,
+        _ => unreachable!("source-map flags were checked as a pair"),
+    };
+    report.write(options.output)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "accepted": report.stats.accepted,
+            "abstained": report.stats.abstained,
+            "deleted": report.stats.deleted,
+            "added": report.stats.added,
+            "ambiguous_targets": report.stats.ambiguous_targets,
+            "candidate_pairs": report.stats.candidate_pairs,
+            "expensive_comparisons": report.stats.expensive_comparisons,
+            "truncated_sources": report.stats.truncated_sources,
+        })
+    );
+    Ok(())
+}
+
+fn run_names(command: NameCommand) -> Result<()> {
+    use naming::{NameProvenance, NameState, SemanticNameDocument};
+
+    let provenance = |origin: String| NameProvenance {
+        origin,
+        actor: None,
+        evidence_digest: None,
+    };
+    match command {
+        NameCommand::Export {
+            input_file,
+            output,
+            include_generated_names,
+        } => {
+            let analysis = analyze_source(&input_file)?;
+            let document = SemanticNameDocument::from_analysis(&analysis, include_generated_names)?;
+            document.write(&output)?;
+            println!(
+                "{}",
+                serde_json::json!({"symbols": document.symbols.len(), "revision": 0})
+            );
+        }
+        NameCommand::Validate {
+            document,
+            source_file,
+        } => {
+            let document = SemanticNameDocument::read(&document)?;
+            if let Some(source_file) = source_file {
+                document.validate_against(&analyze_source(&source_file)?)?;
+            }
+            let approved = document
+                .symbols
+                .iter()
+                .filter(|entry| entry.state == NameState::Approved)
+                .count();
+            println!(
+                "{}",
+                serde_json::json!({"valid": true, "symbols": document.symbols.len(), "approved": approved, "revision": document.revision})
+            );
+        }
+        NameCommand::Set {
+            document,
+            symbol_id,
+            semantic_name,
+            expected_revision,
+            origin,
+        } => {
+            let mut value = SemanticNameDocument::read(&document)?;
+            require_revision(value.revision, expected_revision)?;
+            value.suggest(&symbol_id, semantic_name, provenance(origin))?;
+            value.write(&document)?;
+            println!(
+                "{}",
+                serde_json::json!({"updated": true, "revision": value.revision})
+            );
+        }
+        NameCommand::Approve {
+            document,
+            symbol_id,
+            expected_revision,
+            origin,
+        } => {
+            let mut value = SemanticNameDocument::read(&document)?;
+            require_revision(value.revision, expected_revision)?;
+            value.transition(&symbol_id, NameState::Approved, provenance(origin))?;
+            value.write(&document)?;
+            println!(
+                "{}",
+                serde_json::json!({"updated": true, "revision": value.revision})
+            );
+        }
+        NameCommand::Reject {
+            document,
+            symbol_id,
+            expected_revision,
+            origin,
+        } => {
+            let mut value = SemanticNameDocument::read(&document)?;
+            require_revision(value.revision, expected_revision)?;
+            value.transition(&symbol_id, NameState::Rejected, provenance(origin))?;
+            value.write(&document)?;
+            println!(
+                "{}",
+                serde_json::json!({"updated": true, "revision": value.revision})
+            );
+        }
+        NameCommand::Clear {
+            document,
+            symbol_id,
+            expected_revision,
+            origin,
+        } => {
+            let mut value = SemanticNameDocument::read(&document)?;
+            require_revision(value.revision, expected_revision)?;
+            value.transition(&symbol_id, NameState::Cleared, provenance(origin))?;
+            value.write(&document)?;
+            println!(
+                "{}",
+                serde_json::json!({"updated": true, "revision": value.revision})
+            );
+        }
+        NameCommand::Propagate {
+            source_names,
+            lineage,
+            source_file,
+            target_file,
+            source_map_source,
+            source_map_target,
+            allow_sources_content,
+            output,
+        } => {
+            let names = SemanticNameDocument::read(&source_names)?;
+            let lineage = lineage::LineageReport::read(&lineage)?;
+            let source = analyze_source(&source_file)?;
+            let target = analyze_source(&target_file)?;
+            if source_map_source.is_some() != source_map_target.is_some() {
+                anyhow::bail!(
+                    "--source-map-source and --source-map-target must be supplied together"
+                );
+            }
+            let output_document = match (source_map_source, source_map_target) {
+                (Some(source_map_path), Some(target_map_path)) => {
+                    let source_text = fs::read_to_string(&source_file)?;
+                    let target_text = fs::read_to_string(&target_file)?;
+                    let source_map =
+                        read_source_map_for_lineage(&source_map_path, allow_sources_content)?;
+                    let target_map =
+                        read_source_map_for_lineage(&target_map_path, allow_sources_content)?;
+                    naming::propagate_approved_names_with_source_maps(
+                        &names,
+                        &lineage,
+                        &source,
+                        &target,
+                        naming::SourceMapPropagationInputs {
+                            source_text: &source_text,
+                            target_text: &target_text,
+                            source_map: &source_map,
+                            target_map: &target_map,
+                        },
+                    )?
+                }
+                (None, None) => {
+                    naming::propagate_approved_names(&names, &lineage, &source, &target)?
+                }
+                _ => unreachable!("source-map flags were checked as a pair"),
+            };
+            output_document.write(&output)?;
+            let propagated = output_document
+                .symbols
+                .iter()
+                .filter(|entry| entry.state == NameState::Approved)
+                .count();
+            println!(
+                "{}",
+                serde_json::json!({"propagated": propagated, "revision": output_document.revision})
+            );
+        }
+    }
+    Ok(())
+}
+
+fn require_revision(actual: u64, expected: u64) -> Result<()> {
+    if actual != expected {
+        anyhow::bail!("semantic-name revision changed: expected {expected}, found {actual}");
+    }
+    Ok(())
+}
+
+fn run_analyze(input_file: &std::path::Path, output: &std::path::Path) -> Result<()> {
+    let source = fs::read_to_string(input_file)?;
+    let mut parser = JsParser::new()?;
+    let tree = parser.parse(&source)?;
+    let analysis = analysis::Analysis::from_javascript(&source, &tree)?;
+    analysis.write_positioned(output)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "output": output,
+            "format_version": analysis.version,
+            "profile": analysis.profile,
+            "nodes": analysis.nodes.len(),
+            "scopes": analysis.scopes.len(),
+            "symbols": analysis.symbols.len(),
+            "references": analysis.references.len(),
+            "def_uses": analysis.def_uses.len(),
+            "calls": analysis.calls.len(),
+            "losses": analysis.losses.len(),
+        }))?
+    );
+    Ok(())
+}
+
+fn run_analysis_query(path: &std::path::Path, query: AnalysisQuery) -> Result<()> {
+    let mapped = analysis::MappedAnalysis::open(path)?;
+    let view = mapped.verify()?;
+    let value = match query {
+        AnalysisQuery::Summary => serde_json::json!({
+            "profile": view.profile(),
+            "producer": view.producer(),
+            "frontend": view.frontend(),
+            "source_digest": analysis::StableId(view.source_digest()).to_hex(),
+            "source_length": view.source_length(),
+            "nodes": view.node_count(),
+            "scopes": view.scope_count(),
+            "symbols": view.symbol_count(),
+            "references": view.reference_count(),
+            "def_uses": view.def_use_count(),
+            "calls": view.call_count(),
+            "losses": view.loss_count(),
+        }),
+        AnalysisQuery::Node { index } => {
+            let node = view
+                .node(index)
+                .ok_or_else(|| anyhow::anyhow!("node index {index} is out of range"))?;
+            serde_json::json!({
+                "index": index,
+                "id": node.id.to_hex(),
+                "parent": node.parent,
+                "kind": node.kind,
+                "start_byte": node.start_byte,
+                "end_byte": node.end_byte,
+                "flags": node.flags,
+            })
+        }
+        AnalysisQuery::Scope { index } => {
+            let scope = view
+                .scope(index)
+                .ok_or_else(|| anyhow::anyhow!("scope index {index} is out of range"))?;
+            serde_json::json!({
+                "index": index,
+                "id": scope.id.to_hex(),
+                "parent": scope.parent,
+                "kind": format!("{:?}", scope.kind).to_lowercase(),
+                "depth": scope.depth,
+                "start_byte": scope.start_byte,
+                "end_byte": scope.end_byte,
+            })
+        }
+        AnalysisQuery::Symbol { index } => {
+            let symbol = view
+                .symbol(index)
+                .ok_or_else(|| anyhow::anyhow!("symbol index {index} is out of range"))?;
+            serde_json::json!({
+                "index": index,
+                "id": symbol.id.to_hex(),
+                "declaration_node": symbol.declaration_node,
+                "scope": symbol.scope,
+                "name": symbol.name,
+                "kind": format!("{:?}", symbol.kind).to_lowercase(),
+                "reference_first": symbol.reference_first,
+                "reference_count": symbol.reference_count,
+            })
+        }
+        AnalysisQuery::Reference { index } => {
+            let reference = view
+                .reference(index)
+                .ok_or_else(|| anyhow::anyhow!("reference index {index} is out of range"))?;
+            serde_json::json!({
+                "index": index,
+                "id": reference.id.to_hex(),
+                "node": reference.node,
+                "scope": reference.scope,
+                "name": reference.name,
+                "role": format!("{:?}", reference.role).to_lowercase(),
+            })
+        }
+        AnalysisQuery::DefUse { index } => {
+            let edge = view
+                .def_use(index)
+                .ok_or_else(|| anyhow::anyhow!("def-use index {index} is out of range"))?;
+            serde_json::json!({
+                "index": index,
+                "id": edge.id.to_hex(),
+                "reference": edge.reference,
+                "symbol": edge.symbol,
+                "resolution": format!("{:?}", edge.resolution).to_lowercase(),
+            })
+        }
+        AnalysisQuery::Call { index } => {
+            let call = view
+                .call(index)
+                .ok_or_else(|| anyhow::anyhow!("call index {index} is out of range"))?;
+            serde_json::json!({
+                "index": index,
+                "id": call.id.to_hex(),
+                "node": call.node,
+                "callee_reference": call.callee_reference,
+                "target_symbol": call.target_symbol,
+                "property": call.property,
+                "kind": format!("{:?}", call.kind).to_lowercase(),
+            })
+        }
+        AnalysisQuery::String { index } => serde_json::json!({
+            "index": index,
+            "value": view
+                .string(index)
+                .ok_or_else(|| anyhow::anyhow!("string index {index} is out of range"))?,
+        }),
+        AnalysisQuery::Loss { index } => {
+            let loss = view
+                .loss(index)
+                .ok_or_else(|| anyhow::anyhow!("loss index {index} is out of range"))?;
+            serde_json::json!({
+                "index": index,
+                "code": loss.code as u16,
+                "message": loss.message,
+            })
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
 }
 
 fn run_canonicalize(
@@ -699,4 +1315,20 @@ fn run_load(dump_file: &std::path::Path, format: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod bounded_read_tests {
+    use tempfile::tempdir;
+
+    use super::read_bounded_file;
+
+    #[test]
+    fn bounded_reader_rejects_before_returning_oversized_data() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("bounded.bin");
+        std::fs::write(&path, b"12345").unwrap();
+        let error = read_bounded_file(&path, 4, "fixture").unwrap_err();
+        assert!(error.to_string().contains("fixture exceeds the byte limit"));
+    }
 }

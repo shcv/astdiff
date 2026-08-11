@@ -49,6 +49,63 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Validate and query Source Map v3 files
+    Map {
+        #[clap(subcommand)]
+        command: SourceMapCommand,
+    },
+
+    /// Match symbols across two JavaScript artifacts using structural context
+    Lineage {
+        source_file: PathBuf,
+        target_file: PathBuf,
+        /// Exact raw source map for `source_file`; must be paired with the
+        /// target map.  Maps are never discovered by filename.
+        #[clap(long, value_name = "FILE", requires = "source_map_target")]
+        source_map_source: Option<PathBuf>,
+        /// Exact raw source map for `target_file`; must be paired with the
+        /// source map.
+        #[clap(long, value_name = "FILE", requires = "source_map_source")]
+        source_map_target: Option<PathBuf>,
+        /// Permit embedded sourcesContent while parsing; content is never
+        /// retained or emitted by lineage.
+        #[clap(long)]
+        allow_sources_content: bool,
+        #[clap(short, long, value_name = "FILE")]
+        output: PathBuf,
+        #[clap(long, default_value_t = 7200)]
+        min_score_bps: u32,
+        #[clap(long, default_value_t = 700)]
+        min_margin_bps: u32,
+        #[clap(long, default_value_t = 96)]
+        max_candidates: usize,
+    },
+
+    /// Export, validate, edit, and propagate semantic-name review documents
+    Names {
+        #[clap(subcommand)]
+        command: NameCommand,
+    },
+
+    /// Analyze JavaScript into a verified, mmap-friendly Isoform artifact
+    Analyze {
+        /// Input JavaScript file
+        input_file: PathBuf,
+
+        /// Output analysis artifact (.astir)
+        #[clap(short, long, value_name = "FILE")]
+        output: PathBuf,
+    },
+
+    /// Query a verified Isoform analysis artifact
+    Analysis {
+        /// Path to the analysis artifact (.astir)
+        analysis_file: PathBuf,
+
+        #[clap(subcommand)]
+        query: AnalysisQuery,
+    },
+
     /// Canonicalize JavaScript code (normalize variable names)
     Canon {
         /// Input JavaScript file
@@ -156,6 +213,40 @@ impl Args {
                     pretty: *pretty,
                 },
             },
+            Some(Command::Analyze { input_file, output }) => Mode::Analyze {
+                input_file: input_file.clone(),
+                output: output.clone(),
+            },
+            Some(Command::Map { command }) => Mode::Map(command.clone()),
+            Some(Command::Lineage {
+                source_file,
+                target_file,
+                source_map_source,
+                source_map_target,
+                allow_sources_content,
+                output,
+                min_score_bps,
+                min_margin_bps,
+                max_candidates,
+            }) => Mode::Lineage {
+                source_file: source_file.clone(),
+                target_file: target_file.clone(),
+                source_map_source: source_map_source.clone(),
+                source_map_target: source_map_target.clone(),
+                allow_sources_content: *allow_sources_content,
+                output: output.clone(),
+                min_score_bps: *min_score_bps,
+                min_margin_bps: *min_margin_bps,
+                max_candidates: *max_candidates,
+            },
+            Some(Command::Names { command }) => Mode::Names(command.clone()),
+            Some(Command::Analysis {
+                analysis_file,
+                query,
+            }) => Mode::Analysis {
+                analysis_file: analysis_file.clone(),
+                query: query.clone(),
+            },
             Some(Command::Inspect {
                 input_file,
                 compare_file,
@@ -215,6 +306,29 @@ impl Args {
 
 #[derive(Debug)]
 pub enum Mode {
+    Map(SourceMapCommand),
+    Lineage {
+        source_file: PathBuf,
+        target_file: PathBuf,
+        source_map_source: Option<PathBuf>,
+        source_map_target: Option<PathBuf>,
+        allow_sources_content: bool,
+        output: PathBuf,
+        min_score_bps: u32,
+        min_margin_bps: u32,
+        max_candidates: usize,
+    },
+    Names(NameCommand),
+    /// Build a language-neutral positioned analysis artifact.
+    Analyze {
+        input_file: PathBuf,
+        output: PathBuf,
+    },
+    /// Query a positioned analysis artifact.
+    Analysis {
+        analysis_file: PathBuf,
+        query: AnalysisQuery,
+    },
     /// Canonicalize JavaScript (normalize variable names)
     Canonicalize {
         input_file: PathBuf,
@@ -259,5 +373,170 @@ pub enum Mode {
         query_type: QueryType,
     },
     /// Load and display a dump file
-    Load { dump_file: PathBuf, format: String },
+    Load {
+        dump_file: PathBuf,
+        format: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SourceMapCommand {
+    /// Validate a bounded Source Map v3 document
+    Validate {
+        map_file: PathBuf,
+        #[clap(long)]
+        allow_sources_content: bool,
+    },
+    /// Look up one zero-based generated UTF-16 position
+    Lookup {
+        map_file: PathBuf,
+        #[clap(long)]
+        line: u32,
+        #[clap(long)]
+        column: u32,
+        #[clap(long)]
+        allow_sources_content: bool,
+        /// Include source/name strings instead of only their indexes
+        #[clap(long)]
+        include_source_names: bool,
+    },
+    /// Compose two maps for one zero-based generated UTF-16 position
+    ComposeLookup {
+        outer_map: PathBuf,
+        inner_map: PathBuf,
+        #[clap(long)]
+        line: u32,
+        #[clap(long)]
+        column: u32,
+        #[clap(long)]
+        allow_sources_content: bool,
+        /// Include source/name strings instead of only their indexes
+        #[clap(long)]
+        include_source_names: bool,
+    },
+    /// Persist a regular Source Map as a verified positioned .astsm sidecar
+    Cache {
+        map_file: PathBuf,
+        generated_file: PathBuf,
+        #[clap(short, long, value_name = "FILE")]
+        output: PathBuf,
+        #[clap(long)]
+        allow_sources_content: bool,
+    },
+    /// Verify a positioned .astsm sidecar against exact generated bytes
+    CacheValidate {
+        cache_file: PathBuf,
+        generated_file: PathBuf,
+    },
+    /// Query a verified positioned .astsm sidecar
+    CacheLookup {
+        cache_file: PathBuf,
+        generated_file: PathBuf,
+        #[clap(long)]
+        line: u32,
+        #[clap(long)]
+        column: u32,
+        /// Include source/name strings instead of only source/name indexes
+        #[clap(long)]
+        include_source_names: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum NameCommand {
+    /// Export a bounded review document from JavaScript
+    Export {
+        input_file: PathBuf,
+        #[clap(short, long, value_name = "FILE")]
+        output: PathBuf,
+        /// Include generated spellings; omitted by default for safe review packets
+        #[clap(long)]
+        include_generated_names: bool,
+    },
+    /// Validate a semantic-name review document
+    Validate {
+        document: PathBuf,
+        /// Bind the document to exact source-derived analysis identity
+        #[clap(long)]
+        source_file: Option<PathBuf>,
+    },
+    /// Assign a semantic-name suggestion
+    Set {
+        document: PathBuf,
+        symbol_id: String,
+        semantic_name: String,
+        #[clap(long)]
+        expected_revision: u64,
+        #[clap(long, default_value = "human")]
+        origin: String,
+    },
+    /// Approve an existing suggestion
+    Approve {
+        document: PathBuf,
+        symbol_id: String,
+        #[clap(long)]
+        expected_revision: u64,
+        #[clap(long, default_value = "human")]
+        origin: String,
+    },
+    /// Reject a suggestion while retaining a tombstone state
+    Reject {
+        document: PathBuf,
+        symbol_id: String,
+        #[clap(long)]
+        expected_revision: u64,
+        #[clap(long, default_value = "human")]
+        origin: String,
+    },
+    /// Clear a semantic name while retaining a tombstone state
+    Clear {
+        document: PathBuf,
+        symbol_id: String,
+        #[clap(long)]
+        expected_revision: u64,
+        #[clap(long, default_value = "human")]
+        origin: String,
+    },
+    /// Propagate approved source names through accepted lineage matches
+    Propagate {
+        source_names: PathBuf,
+        lineage: PathBuf,
+        source_file: PathBuf,
+        target_file: PathBuf,
+        /// Exact raw source map for `source_file`; must be paired with the
+        /// target map when propagating a map-bound lineage report.
+        #[clap(long, value_name = "FILE", requires = "source_map_target")]
+        source_map_source: Option<PathBuf>,
+        /// Exact raw source map for `target_file`; must be paired with the
+        /// source map.
+        #[clap(long, value_name = "FILE", requires = "source_map_source")]
+        source_map_target: Option<PathBuf>,
+        /// Permit embedded sourcesContent while parsing; content is not kept.
+        #[clap(long)]
+        allow_sources_content: bool,
+        #[clap(short, long, value_name = "FILE")]
+        output: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AnalysisQuery {
+    /// Show artifact metadata and table sizes
+    Summary,
+    /// Read one AST node by row index
+    Node { index: usize },
+    /// Read one lexical scope by row index
+    Scope { index: usize },
+    /// Read one lexical symbol by row index
+    Symbol { index: usize },
+    /// Read one lexical reference by row index
+    Reference { index: usize },
+    /// Read one reference-to-symbol resolution edge by row index
+    DefUse { index: usize },
+    /// Read one call edge by row index
+    Call { index: usize },
+    /// Read one string through the persisted indexed offset table
+    String { index: usize },
+    /// Read one explicit loss record
+    Loss { index: usize },
 }

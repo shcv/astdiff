@@ -1,0 +1,93 @@
+#+TITLE: Version-Lineage Evaluation Plan
+#+OPTIONS: toc:2
+
+* Goal
+
+Evaluate whether structural context can identify corresponding symbols across
+source transformations and successive minified releases, propagate approved
+semantic names with high precision, and abstain whenever the evidence is
+ambiguous.  Repository documentation and fixtures remain independent of any
+particular private corpus.
+
+* Data boundary
+
+Public tests use generated JavaScript and redistributable project histories.
+Private inputs are separately provisioned through a manifest and are never
+named, described, or embedded in this repository.  A private manifest records
+opaque corpus/artifact IDs, relative paths, byte lengths, SHA-256 digests,
+parser/profile identities, and tool versions.  It must not contain absolute
+paths, usernames, source text, literals, timestamps, or credentials.
+
+Legacy =diff=, =inspect=, debug, dump, row-query, and rename-export output is
+not a safe evidence channel: those paths may expose names, snippets, literals,
+or paths.  Private evaluation requires the dedicated redacted lineage and
+semantic-name formats.  A leakage preflight must reject absolute paths, raw
+source fragments, literal values, and key-like tokens before evidence leaves
+the isolated evaluation directory.
+
+* Stage A: generated semantic fixtures
+
+Generated tests establish one rule at a time:
+
+- functions, classes, imports, lexical bindings, parameters, and shadowing;
+- object/array/default/rest patterns, catch and loop bindings;
+- read, write, read-write, call, construct, and export roles;
+- direct, member, constructor, optional, and dynamic call shapes;
+- property-name exclusion, unresolved references, and ambiguous bindings;
+- rename, insertion, deletion, sibling reorder, wrapper insertion, extraction,
+  inlining, literal changes, and alternative minifier output;
+- one-to-many and many-to-one ambiguity, collision, and abstention cases.
+
+Each labeled match declares the correct target and acceptable abstentions.
+Names and literals are synthetic.
+
+* Stage B: reproducible public histories
+
+Choose small projects with redistributable source, a synchronized lockfile,
+and deterministic production builds.  Export each revision with =git archive=
+into a fresh temporary directory; never switch or clean the live worktree.
+Install dependencies without lifecycle scripts, invoke pinned compiler and
+minifier binaries directly, and record output hashes from repeated builds.
+
+A checked manifest contains only repository URLs, commit IDs, lockfile hashes,
+relative output paths, tool/runtime versions, exact argument arrays, and
+artifact hashes.  Generated dependencies and bundles remain outside git unless
+their license and size make them suitable as explicit fixtures.  A revision
+whose manifest and lockfile disagree fails the reproducibility gate rather than
+silently refreshing dependencies.
+
+* Stage C: external private corpora
+
+Private corpora are optional external validation inputs.  The repository knows
+only opaque manifest IDs and expected hashes.  Inputs are parsed as data; no
+source-provided program, extension, lifecycle hook, or build script is run.
+
+1. Validate every provisioned artifact against the private manifest.
+2. Analyze inputs with pinned parser, grammar, profile, and configuration IDs.
+3. Build identifier-erased structural context: subtree shape, scope ancestry,
+   def-use roles, call/import/export neighborhoods, and hashed rare features.
+4. Use exact structural anchors and rare-feature postings to eliminate
+   impossible candidates before bounded LSH and component scoring.
+5. Require a one-to-one assignment, minimum evidence score, and margins over
+   both source and target runner-up candidates.  Otherwise abstain.
+6. Export only redacted aggregate evidence and semantic-name review packets.
+7. Propagate approved names to the next artifact only through accepted lineage
+   matches; new, conflicting, split, merged, and ambiguous symbols stay open.
+
+* Measurements and exit criteria
+
+Each evaluation records candidate counts after every filter, exact-anchor
+coverage, expensive comparisons, truncations, match/abstention counts,
+precision, recall, top-k accuracy, coverage, conflicts, fixed-point score and
+runner-up margins, wall time, peak memory where available, artifact size, and
+output digest.  Thread count, locale, parser, and configuration are pinned.
+
+The lineage workflow is complete for a corpus only when:
+
+- held-out accepted matches meet the configured precision target;
+- ambiguous cases abstain rather than receiving manufactured names;
+- assignment is deterministic and one-to-one;
+- approved semantic names propagate without scope collisions;
+- another process reproduces byte-identical evidence from the manifest; and
+- the leakage preflight confirms that no source text, literal value, private
+  path, or private artifact is present in repository or exported evidence.

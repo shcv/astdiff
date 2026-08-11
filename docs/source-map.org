@@ -1,0 +1,85 @@
+#+TITLE: Source Map v3 Processing
+#+OPTIONS: toc:2
+
+* Current slice
+
+=astdiff= has a bounded Source Map v3 decoder for regular and indexed maps,
+zero-based generated-position lookup, and two-map lookup composition.  This is
+a standalone validation/query boundary.  Structural lineage can consume maps
+only when both raw files are explicitly supplied; it never silently discovers
+or consumes adjacent map files.
+
+The parser implements 1-, 4-, and 5-field Base64 VLQ segments, persistent
+source/original/name deltas, per-line generated-column resets, mapped and
+unmapped segments, source/name index checks, =sourcesContent= alignment,
+=ignoreList= bounds, ordered non-overlapping indexed sections, and configurable
+byte/source/name/line/segment/section/depth limits.  Nested maps do not inherit
+parent source/name state.
+
+Coordinates are zero-based.  JavaScript and CSS columns are UTF-16 code-unit
+columns, not UTF-8 byte offsets.  Callers must perform an explicit conversion
+before querying from a tree-sitter byte span.
+
+* Safe CLI
+
+#+begin_src sh
+astdiff map validate bundle.js.map
+astdiff map lookup bundle.js.map --line 12 --column 8
+astdiff map compose-lookup generated-to-mid.map mid-to-source.map \
+  --line 12 --column 8
+
+# Persist and query a regular map through the verified positioned sidecar.
+astdiff map cache bundle.js.map bundle.js --output bundle.astsm
+astdiff map cache-validate bundle.astsm bundle.js
+astdiff map cache-lookup bundle.astsm bundle.js --line 12 --column 8
+#+end_src
+
+Default JSON returns mapping status, coordinate basis, and source/name indexes.
+It never prints =sourcesContent=, source paths, source roots, or names.
+=--include-source-names= explicitly opts into those strings.  Maps containing =sourcesContent= require
+=--allow-sources-content=; content is validated for alignment but not retained
+or emitted.
+
+The implementation never fetches a URL, resolves a source path against the
+filesystem, executes generated code, or discovers a map by filename.
+=sourceRoot= and nullable =sources= entries remain separate opaque map values;
+callers that need URL resolution must supply a separate explicit policy.
+The coordinate, VLQ, duplicate-position, and indexed-section rules follow the
+[[https://tc39.es/ecma426/][ECMA-426 Source Map format]].
+
+* Lookup semantics
+
+Lookup selects the greatest generated position not exceeding the query,
+including a mapping on an earlier line when later lines contain none.  All
+mappings at a duplicate generated position are returned as an explicit
+ambiguous result.  A selected 1-field segment is explicitly unmapped.  Indexed
+maps translate eligible section offsets into section-local coordinates while
+preserving the same ambiguity policy.
+
+Composition first maps generated to intermediate coordinates, then queries the
+second map at each exact intermediate location.  If either lookup is unmapped,
+the composition is unmapped.  The inner name wins; the outer name is only a
+fallback.  The caller chooses and validates the pair: v1 does not retain the
+map-level =file= URL and therefore does not infer that identity.
+
+* Persistence and lineage boundary
+
+Regular maps can be persisted in the separate
+=astdiff.sourcemap.v3.positioned= Isoform =.astsm= sidecar without changing
+=astdiff.analysis.v1=.  Its envelope binds the exact layout hash, raw-map
+digest, normalized payload digest, and generated-source digest.  After one
+bounded full verification pass, a line directory provides O(1) line slicing
+and lookup uses binary search within or before the requested line.  Indexed
+maps remain queryable in memory but are rejected by this sidecar profile until
+a canonical section-table representation is defined.  A reverse
+original-to-generated index is also not materialized yet.
+
+Lineage consumes an explicitly supplied map as an independent evidence
+component without requiring a persisted sidecar.  It binds both raw-map
+digests, converts all symbol declaration byte offsets to UTF-16 coordinates in
+one batch per generated source, and uses an internal hash of the mapped
+source-root/source/line/column tuple as a high-priority candidate posting.
+Origin hashes are not serialized; reports carry only a boolean origin-evidence
+component.  Different or moved origins do not hard-delete structural
+candidates.  Source-map names remain provenance and evidence, not automatic
+semantic identity or approval.

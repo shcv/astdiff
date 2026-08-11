@@ -1,0 +1,119 @@
+#+TITLE: Structural Lineage and Semantic Names
+#+OPTIONS: toc:2
+
+* Scope
+
+The lineage pipeline matches lexical symbols between two independently parsed
+JavaScript artifacts and carries explicitly approved semantic labels across
+accepted matches.  It is separate from the legacy declaration diff and rename
+map.  Analysis stable IDs are artifact-local; cross-version identity comes
+from structural context and recorded match evidence, never ID equality.
+
+* Candidate pipeline
+
+The matcher builds identifier-erased subtree and context fingerprints in one
+pass.  Candidate generation applies the cheapest exclusions first:
+
+1. language, front-end, symbol-kind class, scope kind, and bounded size ratio;
+2. unique exact subtree-shape anchors;
+3. rare structural-context feature postings;
+4. bounded LSH postings for both subtree shape and usage context; and
+5. a bounded nearest-size fallback within compatible coarse buckets.
+
+Common rare/LSH postings are discarded and every source symbol has a hard
+candidate cap.  Call neighborhoods use a one-pass target-symbol reverse index,
+so index construction is linear in analysis rows and edges rather than a
+symbols-by-calls scan.  The report records the candidate and expensive-score
+counts so a benchmark can detect a regression toward all-pairs comparison.
+
+Surviving pairs receive fixed-point basis-point components for subtree shape,
+context, reference roles, size, and scope depth.  Unique exact anchors and
+reciprocal best candidates may be accepted.  Every non-exact acceptance must
+clear the configured score and both runner-up margins; truncated, ambiguous,
+or non-reciprocal candidates abstain.  Confidence values are deterministic,
+uncalibrated tiers, not probabilities.  The v1 matcher favors precision and
+abstention; calibrated probabilities and broader component assignment require
+labeled evaluation data.
+
+Lineage JSON contains digests, artifact-local stable IDs, fixed-point evidence,
+source decisions, distinct added-versus-ambiguous target rows, and aggregate
+statistics.  When explicitly supplied with both source maps it also binds the
+raw-map SHA-256 digests and records only a boolean source-map-origin evidence
+component; origin identities remain internal candidate-index data.  It does
+not emit raw source identities, paths, names, source snippets, generated
+names, literal values, or free-form text.  Reading is bounded and
+strict.  Propagation re-analyzes both source files, verifies every report row
+and stable ID, and deterministically recomputes the decisions and evidence
+before trusting a match.  A map-bound report requires the exact generated
+JavaScript bytes and both exact raw maps for validation; no map is discovered
+from a filename or adjacent path.
+
+* Semantic-name review JSON
+
+Semantic names live in a separate strict JSON review document; analysis
+artifacts remain immutable.  A document contains:
+
+- exact analysis identity and the full set of symbol stable IDs;
+- bounded structural context: symbol/scope/node kinds, byte spans, ancestors,
+  child kinds, aggregate roles, and capped reference/def-use/call edges keyed
+  only by structural IDs and enum-like kinds;
+- materialized state =unknown=, =suggested=, =approved=, =rejected=, or
+  =cleared=; and
+- an append-only event stream with operation IDs, revisions, prior/new state,
+  prior/new label, origin/actor, and optional evidence digest.
+
+Default export omits generated spellings.  =--include-generated-names= is an
+explicit opt-in for a reviewer that needs those spellings.  Review packets do
+not include paths, source text, snippets, string literals, arbitrary string
+table values, or free-form notes.  Labels are bounded Unicode review labels;
+they are not automatically applied as ECMAScript identifiers.
+
+Suggestions cannot propagate.  A separate approval transition is required.
+Every mutation requires =--expected-revision=, making stale agent or human
+edits fail rather than overwrite newer work.  Reject and clear operations keep
+their tombstone events.  Repeating an identical operation is idempotent.
+
+* CLI workflow
+
+#+begin_src sh
+astdiff lineage old.js new.js --output old-to-new.lineage.json
+
+# Optional, explicit source-map evidence (the flags are a required pair).
+astdiff lineage old.js new.js --output old-to-new.lineage.json \
+  --source-map-source old.js.map --source-map-target new.js.map
+
+# Safe by default: generated spellings are omitted.
+astdiff names export old.js --output old.names.json
+
+# The symbol ID comes from the review document.
+astdiff names set old.names.json SYMBOL_ID semantic_label \
+  --expected-revision 0 --origin agent
+astdiff names approve old.names.json SYMBOL_ID \
+  --expected-revision 1 --origin human
+
+# Optional bound validation against the exact source artifact.
+astdiff names validate old.names.json --source-file old.js
+
+astdiff names propagate old.names.json old-to-new.lineage.json \
+  old.js new.js --output new.names.json
+
+# A map-bound report must be propagated with the exact same map pair.
+astdiff names propagate old.names.json old-to-new.lineage.json \
+  old.js new.js --output new.names.json \
+  --source-map-source old.js.map --source-map-target new.js.map
+#+end_src
+
+An automated reviewer should edit only =semantic_name= through the CLI or
+produce the same strict event semantics.  Direct arbitrary JSON editing is
+supported for review, but validation rejects unknown fields, duplicate or
+reordered identities, stale event preconditions, invalid provenance tokens,
+scope collisions among approved labels, oversized documents, and mismatched
+source/lineage identities.
+
+* Evaluation
+
+Use generated fixtures and reproducible public histories described in
+=docs/corpus-plan.org=.  Record exact-anchor coverage, candidates after cheap
+filters, expensive comparisons, truncations, accepted/abstained/deleted/added
+counts, precision, recall, coverage, wall time, peak memory, and deterministic
+output digests.  Identical clones and low-margin collisions must abstain.

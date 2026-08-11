@@ -114,7 +114,7 @@ impl ScopeAnalyzer {
                 self.handle_class_declaration(node, source)?;
                 scope_changed = true;
             }
-            "block_statement" => {
+            "statement_block" | "block_statement" | "class_static_block" => {
                 if self.should_create_block_scope(&node) {
                     let block_scope_id = self.create_scope(ScopeType::Block, node);
                     self.current_scope_id = block_scope_id;
@@ -255,7 +255,7 @@ impl ScopeAnalyzer {
                             false,
                         );
                     }
-                    "object_pattern" | "array_pattern" | "assignment_pattern" => {
+                    "object_pattern" | "array_pattern" | "assignment_pattern" | "rest_pattern" => {
                         // Handle destructuring in parameters
                         self.handle_pattern(node, source, VariableKind::Parameter)?;
                     }
@@ -277,6 +277,16 @@ impl ScopeAnalyzer {
         kind: VariableKind,
     ) -> Result<()> {
         match pattern_node.kind() {
+            "identifier" | "shorthand_property_identifier_pattern" => {
+                let name = &source[pattern_node.byte_range()];
+                self.add_variable_to_current_scope(
+                    name.to_string(),
+                    kind,
+                    pattern_node.start_position(),
+                    pattern_node.start_byte(),
+                    false,
+                );
+            }
             "object_pattern" => {
                 self.handle_object_pattern(pattern_node, source, kind)?;
             }
@@ -286,6 +296,14 @@ impl ScopeAnalyzer {
             "assignment_pattern" => {
                 if let Some(left) = pattern_node.child_by_field_name("left") {
                     self.handle_pattern(left, source, kind)?;
+                }
+            }
+            "rest_pattern" => {
+                if let Some(argument) = pattern_node
+                    .child_by_field_name("argument")
+                    .or_else(|| pattern_node.named_child(0))
+                {
+                    self.handle_pattern(argument, source, kind)?;
                 }
             }
             _ => {}
@@ -317,7 +335,8 @@ impl ScopeAnalyzer {
                                         false,
                                     );
                                 }
-                                "object_pattern" | "array_pattern" | "assignment_pattern" => {
+                                "object_pattern" | "array_pattern" | "assignment_pattern"
+                                | "rest_pattern" => {
                                     self.handle_pattern(value, source, kind.clone())?;
                                 }
                                 _ => {}
@@ -333,6 +352,9 @@ impl ScopeAnalyzer {
                             child.start_byte(),
                             false,
                         );
+                    }
+                    "rest_pattern" => {
+                        self.handle_pattern(child, source, kind.clone())?;
                     }
                     _ => {}
                 }
@@ -361,7 +383,7 @@ impl ScopeAnalyzer {
                             false,
                         );
                     }
-                    "object_pattern" | "array_pattern" | "assignment_pattern" => {
+                    "object_pattern" | "array_pattern" | "assignment_pattern" | "rest_pattern" => {
                         self.handle_pattern(child, source, kind.clone())?;
                     }
                     _ => {}
@@ -444,63 +466,12 @@ impl ScopeAnalyzer {
         Ok(())
     }
 
-    fn handle_for_in_statement(&mut self, node: Node, source: &str) -> Result<()> {
+    fn handle_for_in_statement(&mut self, node: Node, _source: &str) -> Result<()> {
         let loop_scope_id = self.create_scope(ScopeType::Block, node);
         self.current_scope_id = loop_scope_id;
-
-        // Handle the loop variable
-        if let Some(left) = node.child_by_field_name("left") {
-            if left.kind() == "identifier" {
-                let var_name = &source[left.byte_range()];
-                self.add_variable_to_current_scope(
-                    var_name.to_string(),
-                    VariableKind::Var,
-                    left.start_position(),
-                    left.start_byte(),
-                    false,
-                );
-            } else if let Some(declarator) = left.child(1) {
-                if declarator.kind() == "variable_declarator" {
-                    if let Some(name_node) = declarator.child_by_field_name("name") {
-                        match name_node.kind() {
-                            "identifier" => {
-                                let name = &source[name_node.byte_range()];
-                                let kind = if left.kind() == "lexical_declaration" {
-                                    if let Some(first) = left.child(0) {
-                                        if &source[first.byte_range()] == "const" {
-                                            VariableKind::Const
-                                        } else {
-                                            VariableKind::Let
-                                        }
-                                    } else {
-                                        VariableKind::Let
-                                    }
-                                } else {
-                                    VariableKind::Var
-                                };
-                                self.add_variable_to_current_scope(
-                                    name.to_string(),
-                                    kind,
-                                    name_node.start_position(),
-                                    name_node.start_byte(),
-                                    false,
-                                );
-                            }
-                            "object_pattern" | "array_pattern" => {
-                                let kind = if left.kind() == "lexical_declaration" {
-                                    VariableKind::Let
-                                } else {
-                                    VariableKind::Var
-                                };
-                                self.handle_pattern(name_node, source, kind)?;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
+        // Child declarations are visited in this loop scope by `visit_node`.
+        // A bare `for (x of xs)` is an assignment to an existing binding, not
+        // a declaration, so it must not create a synthetic variable here.
         Ok(())
     }
 
@@ -514,16 +485,7 @@ impl ScopeAnalyzer {
         self.current_scope_id = catch_scope_id;
 
         if let Some(param) = node.child_by_field_name("parameter") {
-            if param.kind() == "identifier" {
-                let param_name = &source[param.byte_range()];
-                self.add_variable_to_current_scope(
-                    param_name.to_string(),
-                    VariableKind::Parameter,
-                    param.start_position(),
-                    param.start_byte(),
-                    false,
-                );
-            }
+            self.handle_pattern(param, source, VariableKind::Parameter)?;
         }
 
         Ok(())
@@ -573,22 +535,23 @@ impl ScopeAnalyzer {
                                     for j in 0..import_child.child_count() {
                                         if let Some(import_spec) = import_child.child(j) {
                                             if import_spec.kind() == "import_specifier" {
-                                                let name = if let Some(alias) =
+                                                let binding = if let Some(alias) =
                                                     import_spec.child_by_field_name("alias")
                                                 {
-                                                    &source[alias.byte_range()]
+                                                    alias
                                                 } else if let Some(name) =
                                                     import_spec.child_by_field_name("name")
                                                 {
-                                                    &source[name.byte_range()]
+                                                    name
                                                 } else {
                                                     continue;
                                                 };
+                                                let name = &source[binding.byte_range()];
                                                 self.add_variable_to_current_scope(
                                                     name.to_string(),
                                                     VariableKind::Const,
-                                                    import_spec.start_position(),
-                                                    import_spec.start_byte(),
+                                                    binding.start_position(),
+                                                    binding.start_byte(),
                                                     false,
                                                 );
                                             }

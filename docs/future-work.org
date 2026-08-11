@@ -3,11 +3,11 @@
 
 * Purpose and status
 
-This document records the deferred roadmap after the current JavaScript
-parser, scope analysis, canonicalization, mapping, matching, and dump
-pipeline.  Phases 5--8 are intentionally off to the side: they are design
-and delivery gates for later work, not a claim that these capabilities are
-implemented today.
+This document records the staged roadmap beyond the JavaScript parser, scope
+analysis, canonicalization, legacy matching, and dump pipeline.  Phase 5 now
+has a working analysis/cache slice plus the first structural-lineage and
+semantic-name-review pass.  The remaining acceptance criteria and Phases 6--8
+are delivery gates, not claims that every listed capability is complete.
 
 The order is significant.  A language-neutral identity and schema contract
 must exist before source locations can be propagated across transforms;
@@ -52,6 +52,35 @@ fixture evidence are recorded.  A later phase must not introduce a shadow
 identity or incompatible serializer merely to avoid an earlier gate.
 
 * Phase 5: language-neutral IR and Isoform schemas
+
+** Current implementation slice
+
+The initial Phase-5 slice now defines =astdiff.analysis.v1=: a deterministic
+language-neutral Rust model and a bare Isoform positioned schema for source
+identity, complete AST node shape, lexical scopes and bindings, identifier
+references, def-use resolution, static call shape, stable row identities, and
+explicit loss records.  Its columnar local artifact uses schema-order field
+access, contiguous symbol-reference ranges, and a materialized string offset
+table.  A fixed envelope pins the layout hash and source/payload digests;
+files are memory mapped, fully verified once, then exposed through borrowed
+O(1) fixed-row and reference-slice-location accessors.  Indexed string
+locations are O(1); the current UTF-8 accessor is O(string byte length).
+
+This is not Phase-5 completion.  Portable tagged interchange,
+independent-consumer conformance, stable cross-version lineage, temporal and
+flow-sensitive resolution, dynamic call targets, and the remaining loss-free
+adapter coverage below are still required.
+
+The first lineage slice is documented in =docs/lineage.org=.  It builds
+identifier-erased subtree, scope, role, and call context; filters candidates
+through exact, rare-feature, bounded LSH, and nearest-size indexes; records
+fixed-point evidence and two-sided margins; and abstains on ambiguous or
+truncated candidates.  A strict JSON semantic-name document supports bounded
+review context, append-only audited edits, explicit approval, stale-revision
+rejection, and propagation only after source/target row identities are
+revalidated.  Its confidence tiers are deliberately uncalibrated, and its
+JSON review state is not yet the durable Isoform naming sidecar described in
+the later deliverables.
 
 ** Objective
 
@@ -107,6 +136,16 @@ mapping text format.
   machine-readable, and tested for any excluded construct.
 
 * Phase 6: Source Map v3 and symbol-lineage propagation
+
+** Current implementation slice
+
+The current Phase-6 slice provides bounded Source Map v3 regular/indexed
+parsing, strict Base64 VLQ and index validation, zero-based UTF-16
+generated-position lookup, explicit ambiguity, safe redacted CLI output,
+two-map lookup composition, an Isoform positioned sidecar for regular maps,
+and explicitly map-bound structural-lineage evidence.  Indexed-map
+persistence, reverse queries, normalized map emission, and original-source IR
+edges remain future work.  See =docs/source-map.org=.
 
 ** Objective
 

@@ -14,6 +14,10 @@ A high-performance AST-based structural diff tool for JavaScript that intelligen
 - **Multiple Output Formats**: Detailed unified, summary, compact, and JSON outputs
 - **Rename Exports**: Save detected old-to-new declaration names as YAML
 - **Validated Dumps**: Save and inspect versioned analysis results with integrity checks
+- **Positioned Analysis IR**: Persist deterministic, language-neutral AST/scope/symbol columns for mmap-backed O(1) fixed-row queries after verification
+- **Version Lineage**: Match symbols through identifier-erased structural context with bounded candidate indexes, two-sided margins, and explicit abstention
+- **Semantic Name Review**: Export strict bounded JSON, record audited suggestions and approvals, and propagate only approved labels
+- **Source Map v3 Queries**: Strict bounded VLQ validation, indexed lookup, and two-map position composition with redacted output defaults
 
 ## Installation
 
@@ -59,9 +63,6 @@ astdiff old.js new.js --format json
 ### Advanced Options
 
 ```bash
-# Show renamed functions (hidden by default)
-ASTDIFF_SHOW_RENAMES=1 astdiff old.js new.js
-
 # Export detected declaration renames (old name -> new name)
 astdiff old.js new.js --export-mappings renames.yaml
 
@@ -88,9 +89,92 @@ astdiff query comparison.astdump validate v1.js v2.js
 astdiff load comparison.astdump
 ```
 
+### Language-neutral analysis artifacts
+
+Build a deterministic Phase-5 analysis artifact from JavaScript, then query
+its verified mmap-backed columns. Opening checks the fixed envelope, schema
+layout hash, recorded source digest, and payload digest; `analysis` performs
+one full Isoform verification pass before any borrowed access. Library callers
+that also have the current source bytes can use `MappedAnalysis::open_for_source`
+to bind the cache to those exact bytes.
+
+```bash
+astdiff analyze input.js --output input.astir
+astdiff analysis input.astir summary
+astdiff analysis input.astir node 0
+astdiff analysis input.astir symbol 0
+astdiff analysis input.astir reference 0
+astdiff analysis input.astir def-use 0
+astdiff analysis input.astir call 0
+astdiff analysis input.astir string 0
+astdiff analysis input.astir loss 0
+```
+
+The v1 adapter records the complete tree shape, lexical scopes, nested lexical
+bindings, identifier references, def-use resolution, direct/member/constructor
+call shapes, artifact-local stable IDs, provenance, and explicit unsupported
+features. Temporal-dead-zone and flow-sensitive resolution, dynamic call
+targets, and matcher fingerprints remain listed as losses rather than being
+silently omitted. Structural lineage can consume source-map evidence only
+through an explicit paired source/target map invocation.
+
+See [the Analysis IR v1 contract](docs/analysis-ir.org) for identity, encoding,
+trust-boundary, and compatibility details.
+
+### Version lineage and semantic names
+
+Create a redacted lineage report and a semantic-name review document:
+
+```bash
+astdiff lineage old.js new.js --output old-to-new.lineage.json
+# Optional source-map evidence; both flags are required together.
+astdiff lineage old.js new.js --output old-to-new.lineage.json \
+  --source-map-source old.js.map --source-map-target new.js.map
+astdiff names export old.js --output old.names.json
+```
+
+The export omits generated spellings by default. After selecting a symbol ID
+from the document, an agent or human can suggest a label; a separate explicit
+approval is required before propagation:
+
+```bash
+astdiff names set old.names.json SYMBOL_ID semantic_label \
+  --expected-revision 0 --origin agent
+astdiff names approve old.names.json SYMBOL_ID \
+  --expected-revision 1 --origin human
+astdiff names validate old.names.json --source-file old.js
+astdiff names propagate old.names.json old-to-new.lineage.json \
+  old.js new.js --output new.names.json
+```
+
+Each edit appends a deterministic audit event and uses an expected revision so
+stale edits fail. Only approved labels cross accepted one-to-one matches;
+ambiguous or low-margin symbols remain unknown. See
+[the lineage and naming contract](docs/lineage.org).
+
+The staged path from generated fixtures through reproducible public histories
+to optional externally provisioned lineage corpora is documented in
+[the corpus plan](docs/corpus-plan.org).
+
+Run `tools/benchmark-analysis.sh INPUT.js RUNS` to measure deterministic
+artifact generation and the mandatory map/verify pass on a representative
+bundle. Run `tools/benchmark-lineage.sh OLD.js NEW.js RUNS` to record matcher
+latency, candidate reduction, expensive comparisons, decisions, truncations,
+and deterministic report digests.
+
 ### Other Commands
 
 ```bash
+# Validate and query Source Map v3 coordinates
+astdiff map validate bundle.js.map
+astdiff map lookup bundle.js.map --line 12 --column 8
+astdiff map compose-lookup generated-to-mid.map mid-to-source.map --line 12 --column 8
+
+# Persist/query a regular map in the verified positioned cache
+astdiff map cache bundle.js.map bundle.js --output bundle.astsm
+astdiff map cache-validate bundle.astsm bundle.js
+astdiff map cache-lookup bundle.astsm bundle.js --line 12 --column 8
+
 # Canonicalize JavaScript (normalize variable names)
 astdiff canon input.js
 
@@ -106,6 +190,9 @@ astdiff inspect file.js functionName --compare-file other.js
 
 ```
 
+Source-map output uses zero-based UTF-16 columns and emits only source/name
+indexes by default. See [the Source Map v3 contract](docs/source-map.org).
+
 ## How It Works
 
 1. **Parsing**: Uses tree-sitter to parse JavaScript into ASTs
@@ -113,7 +200,7 @@ astdiff inspect file.js functionName --compare-file other.js
 3. **Structural Hashing**: Creates hash signatures for each declaration's AST structure
 4. **MinHash Signatures**: Generates compact signatures for efficient similarity estimation
 5. **Fingerprinting**: Extracts semantic features (strings, constants, API calls) for better matching
-6. **Parallel Matching**: Uses parallel algorithms to find best matches between declarations
+6. **Parallel Matching**: Uses parallel algorithms to find best legacy diff matches between declarations
 7. **Change Detection**: Identifies additions, deletions, modifications, and renames
 
 ## Performance
@@ -129,7 +216,7 @@ The tool reports several types of changes:
 
 - **Added/Removed Functions**: New or deleted declarations
 - **Modified Functions**: Structurally changed but matched declarations
-- **Renamed Functions**: High-confidence matches with different names (hidden by default)
+- **Renamed Functions**: Legacy declaration matches with different names (hidden by default); use `lineage` for evidence-bearing propagation
 - **Structural Similarity**: Overall percentage of matched declarations
 
 Example output:
@@ -141,7 +228,6 @@ Changes: 18 additions, 7 deletions, 10 modifications (+ 7206 renames)
 
 ## Environment Variables
 
-- `ASTDIFF_SHOW_RENAMES`: Show renamed functions in output
 - `ASTDIFF_DEBUG`: Enable debug output for fingerprint extraction
 - `ASTDIFF_PROFILE`: Show performance profiling information
 
@@ -150,6 +236,10 @@ Changes: 18 additions, 7 deletions, 10 modifications (+ 7206 renames)
 Requirements:
 - Rust 1.70+
 - C++ compiler (for tree-sitter)
+- The joint-development Isoform checkout configured in `Cargo.toml`. The
+  checked-in analysis schema artifact must be regenerated with that checkout's
+  schema-artifact version. A reproducibly pinned release or vendored source is
+  required before publishing independently.
 
 ```bash
 git clone https://github.com/shcv/astdiff

@@ -24,6 +24,9 @@ astdiff is an AST-based structural diff tool for JavaScript that matches renamed
 2. **Scope Analysis** (`src/scope/`) - variable scope tracking
 3. **Canonicalization** (`src/canonicalizer/`) - normalize variable names for comparison
 4. **Diff Engine** (`src/diff/`) - structural comparison and matching
+5. **Analysis IR** (`src/analysis/`) - verified positioned AST/scope/symbol graph
+6. **Lineage** (`src/lineage.rs`) - bounded structural-context symbol matching
+7. **Semantic Names** (`src/naming.rs`) - strict audited review and propagation
 
 ### Diff Matching System (src/diff/)
 
@@ -45,10 +48,10 @@ Serializable analysis results for faster re-runs. Uses bincode + zstd compressio
 
 ### CLI (src/cli/)
 
-clap-based CLI with subcommands: diff (default), canon, inspect, query, load.
+clap-based CLI with subcommands: diff (default), canon, analyze, analysis,
+lineage, names, inspect, query, and load.
 
 ## Environment Variables
 
 - `ASTDIFF_DEBUG` - Enable debug output for fingerprint extraction
 - `ASTDIFF_PROFILE` - Show performance profiling
-- `ASTDIFF_SHOW_RENAMES` - Include renames in output

@@ -1,4 +1,4 @@
-# Example VarMap Mapping File - Scope-Aware Format
+# Example astdiff legacy canonicalization mapping - scope-aware format
 # This file demonstrates the scope-aware mapping format.
 # Each unique variable (by scope + name) appears only once.
 #
@@ -7,7 +7,7 @@
 # - LAST: Last occurrence (line:column) 
 # - TYPE: func, param, or var
 # - SCOPE: Scope where variable is defined
-# - CANONICAL: Canonicalized name from VarMap
+# - CANONICAL: Canonicalized name from astdiff
 # - NEW: User-provided replacement name
 #
 # Example entries:

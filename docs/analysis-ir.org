@@ -1,0 +1,158 @@
+#+TITLE: Analysis IR v1
+#+OPTIONS: toc:2
+
+* Scope
+
+=astdiff.analysis.v1= is a deterministic, language-neutral analysis profile
+for one source artifact.  The first producer is the JavaScript tree-sitter
+adapter.  It records the complete syntax-tree shape, lexical scopes, nested
+bindings, lexical references, def-use resolution, static call shape, source
+identity, producer identity, and explicit loss records.
+
+Symbols are lexical bindings.  Property names, including class method names,
+remain syntax nodes and call properties rather than lexical symbol rows.
+
+The profile is a local analysis and cache contract.  It is separate from the
+legacy comparison dump and is not yet a portable interchange format.  In
+particular, v1 does not perform temporal-dead-zone or flow-sensitive
+resolution, infer member/dynamic call targets, ingest source-map lineage, or
+persist matcher fingerprint evidence.  Each omission is represented by a
+machine-readable loss record.
+
+* Identity and ordering
+
+All rows are emitted in deterministic order.  Node rows use syntax-tree
+pre-order.  Scope rows are ordered by depth, span, kind, and the source
+adapter's deterministic scope key.  Symbol rows are ordered by scope and
+declaration position.  References are grouped by resolved symbol and then by
+source position, making each symbol's neighborhood contiguous.  Calls are
+ordered by source position.
+
+Rows use =u32= indexes for relationships inside one artifact.  These indexes
+are not durable identities.  SHA-256 IDs use length-delimited, domain-separated
+inputs:
+
+- Node ID: parent row, child ordinal, node-kind bytes, and node flags.
+- Scope ID: parent row, language-neutral scope kind, depth, and byte span.
+- Symbol ID: binding node ID and language-neutral symbol kind.
+- Reference ID: identifier node ID and read/write/call role.
+- Def-use ID: reference ID, resolved symbol ID (or zero), and resolution kind.
+- Call ID: call node ID, call kind, callee/target identities, and property row.
+
+Symbol spelling and absolute span are deliberately absent from the symbol ID,
+so a same-shape rename does not change it even when spelling width changes.
+These IDs are
+artifact-local structural identities, not a promise of cross-version
+lineage.  Insertions that move spans may change them.  Cross-version matching
+and propagated identities belong to the later lineage pass.
+
+* Positioned payload
+
+The canonical schema source is =schemas/analysis-v1.json=.  The checked-in
+=schemas/analysis-v1.isf= artifact is generated and checked with
+=tools/analysis-schema.sh=.  The schema is bare and rejects unknown fields;
+the cache envelope pins its exact Isoform layout hash.
+
+The payload uses a columnar layout:
+
+- Metadata contains the profile, producer, language, front-end, source digest,
+  source length, and table row counts.
+- The shared UTF-8 string table is an indexed variable-element repetition with
+  a persisted =(count + 1)= offset table.
+- Node columns contain parent, child ordinal, kind-string row, byte span, and
+  flags.
+- Scope columns contain parent, kind, depth, and byte span.
+- Symbol columns contain 32-byte IDs, declaration-node, scope, name, kind, and
+  contiguous reference-range fields.
+- Reference columns contain 32-byte IDs, identifier node, scope, name, and
+  lexical operation role.
+- Def-use columns contain 32-byte IDs, reference/symbol rows, and explicit
+  resolved, unresolved, or ambiguous status.
+- Call columns contain 32-byte IDs, call node, optional callee reference,
+  optional target symbol, optional member property, and call-shape kind.
+- Loss columns contain a stable code and message-string row.
+
+Node and scope IDs are derived directly from fixed-width columns and therefore
+are not stored redundantly.  Source spans use four-byte positioned columns;
+the profile rejects source artifacts of 4 GiB or larger.
+
+* Cache envelope and trust boundary
+
+An =.astir= file is a 128-byte application envelope followed by one canonical
+Isoform positioned message.  The envelope contains:
+
+- =ASTIR= magic, container version, positioned-mode flag, and header size;
+- the exact Isoform layout hash;
+- the source SHA-256 digest;
+- the positioned-payload SHA-256 digest and exact payload length; and
+- reserved zero bytes for a future container version.
+
+Writers create and synchronize a same-directory temporary file before an
+atomic rename.  Readers validate the envelope, length, layout identity, and
+payload digest before exposing the mapped payload.  This detects corruption,
+not authorship: SHA-256 is unkeyed.  The recorded source digest is metadata
+unless the caller uses =MappedAnalysis::open_for_source= (or performs the same
+comparison) with the current source bytes.
+
+No mapped byte is trusted merely because it is local.  Opening is followed by
+Isoform's mandatory bounded O(payload) structural and canonical verification,
+then an application pass validating UTF-8, column lengths, enum codes, row
+references, parent ordering, stable IDs, symbol reference ranges, def-use
+consistency, and source-span bounds.  Only a canonical verified view is
+accepted.
+
+After that full verification, retained borrowed views provide allocation-free
+O(1) access to fixed-width rows, string-table element locations, and a
+symbol's reference slice location.  The current UTF-8 string accessor checks
+the selected bytes again, so returning a string is O(string byte length).
+Consuming all references remains O(result size).  The O(1) statement does not
+include file opening, hashing, verification, or iterating variable-size data.
+
+* Resource limits and compatibility
+
+Analysis v1 has explicit limits of 4 GiB per cache payload, 20 million rows,
+and a 32-bit source-span address space.  These replace Isoform's smaller
+default message budget for large bundles while remaining bounded.
+
+A different cache version, flag set, layout hash, profile, language code,
+unknown enum value, invalid digest, malformed column, or noncanonical
+positioned payload is rejected.  Schema evolution therefore creates a new
+profile/container contract or a defined lineage-compatible profile; readers
+do not guess at compatibility.
+
+This v1 profile is an unreleased development contract.  Its schema may change
+without migration until the first release that declares persisted-artifact
+compatibility; after that point, incompatible changes require a new profile.
+
+The Rust dependency currently targets a joint-development Isoform checkout.
+The checked-in schema artifact is generated with that checkout's current
+schema-artifact version.  This development-time path dependency must be
+replaced by a reproducibly pinned release or vendored source before publishing
+=astdiff= independently.
+
+* Commands and verification
+
+Create and query an artifact:
+
+#+begin_src sh
+astdiff analyze input.js --output input.astir
+astdiff analysis input.astir summary
+astdiff analysis input.astir node 0
+astdiff analysis input.astir symbol 0
+astdiff analysis input.astir reference 0
+astdiff analysis input.astir def-use 0
+astdiff analysis input.astir call 0
+#+end_src
+
+Regenerate/check the schema and benchmark a representative source file:
+
+#+begin_src sh
+tools/analysis-schema.sh check
+tools/benchmark-analysis.sh input.js 3
+#+end_src
+
+The tests cover deterministic model and payload generation, patterns/imports,
+lexical shadowing, assignment roles, property boundaries, call shapes,
+mmap-backed relation queries, layout and payload-digest rejection, forged IDs,
+invalid UTF-8 after structurally valid decoding, and CLI create/query round
+trips.

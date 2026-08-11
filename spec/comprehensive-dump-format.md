@@ -2,7 +2,12 @@
 
 ## Overview
 
-This specification defines a binary format for storing complete AST diff analysis results, including all declarations, matching results, and diff information in a single, efficient file.
+This document describes the legacy `.astdump` format and proposed extensions.
+The current implementation has a validated v2 envelope, bounded decode,
+load/query operations, and source validation. Candidate-rejection evidence,
+rematching, and the exploratory APIs below are proposals, not current
+behavior. Version lineage and semantic-name evidence use the separate formats
+documented in `docs/lineage.org`.
 
 ## Format Design
 
@@ -174,7 +179,7 @@ impl AstDiffDump {
 astdiff file1.js file2.js --dump analysis.astdump
 
 # Load and inspect specific declaration
-astdiff inspect analysis.astdump --identifier _C8
+astdiff inspect analysis.astdump --identifier synthetic_name
 
 # Query specific information
 astdiff query analysis.astdump find func1
