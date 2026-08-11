@@ -145,12 +145,25 @@ astdiff names approve old.names.json SYMBOL_ID \
 astdiff names validate old.names.json --source-file old.js
 astdiff names propagate old.names.json old-to-new.lineage.json \
   old.js new.js --output new.names.json
+
+# Recreate a readable target artifact; the minified input is never modified
+astdiff names render new.names.json new.js --output new-readable.js
+
+# Propagation can publish the review document and reconstructed JavaScript together
+astdiff names propagate old.names.json old-to-new.lineage.json \
+  old.js new.js --output new.names.json --render-output new-readable.js
 ```
 
 Each edit appends a deterministic audit event and uses an expected revision so
 stale edits fail. Only approved labels cross accepted one-to-one matches;
 ambiguous or low-margin symbols remain unknown. See
 [the lineage and naming contract](docs/lineage.org).
+
+Rendering is an explicit output operation. It applies approved names to target
+declarations and resolved references, preserves the target input bytes, and
+parse-checks the recreated artifact. `--format preserve` changes only approved
+identifier spans; the default `pretty` format uses deterministic indentation
+and whitespace.
 
 The staged path from generated fixtures through reproducible public histories
 to optional externally provisioned lineage corpora is documented in

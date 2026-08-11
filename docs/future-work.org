@@ -145,7 +145,9 @@ generated-position lookup, explicit ambiguity, safe redacted CLI output,
 two-map lookup composition, an Isoform positioned sidecar for regular maps,
 and explicitly map-bound structural-lineage evidence.  Indexed-map
 persistence, reverse queries, normalized map emission, and original-source IR
-edges remain future work.  See =docs/source-map.org=.
+edges remain future work.  Approved target names can now be rendered into a
+separate parse-checked JavaScript output with deterministic formatting; input
+artifacts remain immutable.  See =docs/source-map.org= and =docs/lineage.org=.
 
 ** Objective
 

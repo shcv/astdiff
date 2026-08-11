@@ -73,6 +73,18 @@ Every mutation requires =--expected-revision=, making stale agent or human
 edits fail rather than overwrite newer work.  Reject and clear operations keep
 their tombstone events.  Repeating an identical operation is idempotent.
 
+* Reconstructed output
+
+Rendering is a separate, explicit publication step.  It validates the
+semantic-name document against the exact target analysis, replaces only
+approved target declarations and resolved references, and writes a new output
+path.  The target input is never edited.  The default =pretty= format applies
+deterministic indentation and whitespace; =--format preserve= changes only
+approved identifier spans.  Both formats parse-check the recreated JavaScript
+before publication.  A semantic label that is not valid in the target's
+JavaScript context is rejected rather than quoted, truncated, or silently
+rewritten.
+
 * CLI workflow
 
 #+begin_src sh
@@ -96,6 +108,13 @@ astdiff names validate old.names.json --source-file old.js
 
 astdiff names propagate old.names.json old-to-new.lineage.json \
   old.js new.js --output new.names.json
+
+# Recreate a separate readable target artifact; old.js/new.js are untouched.
+astdiff names render new.names.json new.js --output new-readable.js
+
+# Or publish the review document and reconstructed artifact together.
+astdiff names propagate old.names.json old-to-new.lineage.json \
+  old.js new.js --output new.names.json --render-output new-readable.js
 
 # A map-bound report must be propagated with the exact same map pair.
 astdiff names propagate old.names.json old-to-new.lineage.json \

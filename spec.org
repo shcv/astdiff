@@ -3,7 +3,8 @@
 
 =astdiff= parses JavaScript, provides a legacy structural declaration diff,
 emits a verified positioned analysis IR, matches symbol lineage between exact
-analysis identities, and maintains reviewable semantic-name state.
+analysis identities, maintains reviewable semantic-name state, and can render
+an immutable target input into a separate renamed/pretty-printed artifact.
 
 The authoritative component contracts are:
 

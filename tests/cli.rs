@@ -224,6 +224,7 @@ fn lineage_and_semantic_names_work_end_to_end_without_leaking_default_names() {
     let lineage = directory.path().join("lineage.json");
     let names = directory.path().join("names.json");
     let propagated = directory.path().join("propagated.json");
+    let propagated_js = directory.path().join("propagated.js");
     std::fs::write(
         &source,
         "function sentinelGeneratedName(value) { return value + 1; }",
@@ -339,6 +340,8 @@ fn lineage_and_semantic_names_work_end_to_end_without_leaking_default_names() {
         .arg(&target)
         .arg("--output")
         .arg(&propagated)
+        .arg("--render-output")
+        .arg(&propagated_js)
         .output()
         .unwrap();
     assert!(
@@ -355,6 +358,123 @@ fn lineage_and_semantic_names_work_end_to_end_without_leaking_default_names() {
         .iter()
         .any(|entry| entry["semantic_name"] == "increment_value" && entry["state"] == "approved"));
     assert_eq!(propagated["events"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "function a(b) { return b + 1; }"
+    );
+    assert_eq!(
+        std::fs::read_to_string(propagated_js).unwrap(),
+        "function increment_value(b) {\n  return b + 1;\n}\n"
+    );
+}
+
+#[test]
+fn names_render_recreates_a_minified_target_with_variable_names() {
+    let directory = tempdir().unwrap();
+    let target = directory.path().join("target.js");
+    let names = directory.path().join("target.names.json");
+    let rendered = directory.path().join("target-readable.js");
+    let original = "function a(b){const c=b+1;return c}";
+    std::fs::write(&target, original).unwrap();
+
+    let export = command()
+        .arg("names")
+        .arg("export")
+        .arg(&target)
+        .arg("--output")
+        .arg(&names)
+        .arg("--include-generated-names")
+        .output()
+        .unwrap();
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&names).unwrap()).unwrap();
+    let names_by_generated = document["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["generated_name"].as_str().unwrap().to_string(),
+                entry["symbol_id"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut revision = 0;
+    for (generated, semantic) in [("a", "calculate_total"), ("b", "items"), ("c", "total")] {
+        let symbol_id = names_by_generated.get(generated).unwrap();
+        let set = command()
+            .arg("names")
+            .arg("set")
+            .arg(&names)
+            .arg(symbol_id)
+            .arg(semantic)
+            .arg("--expected-revision")
+            .arg(revision.to_string())
+            .arg("--origin")
+            .arg("test")
+            .output()
+            .unwrap();
+        assert!(
+            set.status.success(),
+            "{}",
+            String::from_utf8_lossy(&set.stderr)
+        );
+        revision += 1;
+        let approve = command()
+            .arg("names")
+            .arg("approve")
+            .arg(&names)
+            .arg(symbol_id)
+            .arg("--expected-revision")
+            .arg(revision.to_string())
+            .arg("--origin")
+            .arg("test")
+            .output()
+            .unwrap();
+        assert!(
+            approve.status.success(),
+            "{}",
+            String::from_utf8_lossy(&approve.stderr)
+        );
+        revision += 1;
+    }
+
+    let render = command()
+        .arg("names")
+        .arg("render")
+        .arg(&names)
+        .arg(&target)
+        .arg("--output")
+        .arg(&rendered)
+        .output()
+        .unwrap();
+    assert!(
+        render.status.success(),
+        "{}",
+        String::from_utf8_lossy(&render.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(rendered).unwrap(),
+        "function calculate_total(items) {\n  const total = items + 1;\n  return total\n}\n"
+    );
+    let overwrite = command()
+        .arg("names")
+        .arg("render")
+        .arg(&names)
+        .arg(&target)
+        .arg("--output")
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(!overwrite.status.success());
+    assert_eq!(std::fs::read_to_string(target).unwrap(), original);
 }
 
 #[test]

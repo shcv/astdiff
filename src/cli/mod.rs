@@ -516,6 +516,24 @@ pub enum NameCommand {
         allow_sources_content: bool,
         #[clap(short, long, value_name = "FILE")]
         output: PathBuf,
+        /// Also write a reconstructed target JavaScript artifact
+        #[clap(long, value_name = "FILE")]
+        render_output: Option<PathBuf>,
+        /// Formatting for a reconstructed artifact
+        #[clap(long, default_value = "pretty", value_parser = ["pretty", "preserve"])]
+        render_format: String,
+    },
+    /// Recreate a JavaScript artifact from approved target semantic names
+    Render {
+        /// Semantic-name document bound to the target artifact
+        document: PathBuf,
+        /// Target JavaScript input; it is read but never modified
+        target_file: PathBuf,
+        #[clap(short, long, value_name = "FILE")]
+        output: PathBuf,
+        /// Formatting for the reconstructed artifact
+        #[clap(long, default_value = "pretty", value_parser = ["pretty", "preserve"])]
+        format: String,
     },
 }
 

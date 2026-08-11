@@ -190,7 +190,7 @@ impl SemanticNameDocument {
             let all_children = analysis
                 .nodes
                 .iter()
-                .filter(|node| node.parent == Some(declaration_row as u32))
+                .filter(|node| node.parent == Some(declaration_row as u32) && node.flags & 1 != 0)
                 .collect::<Vec<_>>();
             let child_kinds = all_children
                 .iter()

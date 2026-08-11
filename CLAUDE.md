@@ -49,7 +49,7 @@ Serializable analysis results for faster re-runs. Uses bincode + zstd compressio
 ### CLI (src/cli/)
 
 clap-based CLI with subcommands: diff (default), canon, analyze, analysis,
-lineage, names, inspect, query, and load.
+lineage, names (including explicit target rendering), inspect, query, and load.
 
 ## Environment Variables
 

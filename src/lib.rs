@@ -8,6 +8,7 @@ pub mod mapping;
 pub mod naming;
 pub mod parser;
 pub mod pretty;
+pub mod render;
 pub mod scope;
 pub mod sourcemap;
 
@@ -497,6 +498,8 @@ fn run_names(command: NameCommand) -> Result<()> {
             source_map_target,
             allow_sources_content,
             output,
+            render_output,
+            render_format,
         } => {
             let names = SemanticNameDocument::read(&source_names)?;
             let lineage = lineage::LineageReport::read(&lineage)?;
@@ -533,7 +536,21 @@ fn run_names(command: NameCommand) -> Result<()> {
                 }
                 _ => unreachable!("source-map flags were checked as a pair"),
             };
+            let rendered = if let Some(path) = render_output.as_ref() {
+                reject_input_overwrite(&target_file, path)?;
+                let target_text = fs::read_to_string(&target_file)?;
+                let format = parse_render_format(&render_format)?;
+                Some((
+                    path,
+                    render::render_semantic_names(&output_document, &target, &target_text, format)?,
+                ))
+            } else {
+                None
+            };
             output_document.write(&output)?;
+            if let Some((path, bytes)) = rendered {
+                render::write_output(path, &bytes)?;
+            }
             let propagated = output_document
                 .symbols
                 .iter()
@@ -541,9 +558,62 @@ fn run_names(command: NameCommand) -> Result<()> {
                 .count();
             println!(
                 "{}",
-                serde_json::json!({"propagated": propagated, "revision": output_document.revision})
+                serde_json::json!({
+                    "propagated": propagated,
+                    "revision": output_document.revision,
+                    "rendered": render_output.is_some(),
+                })
             );
         }
+        NameCommand::Render {
+            document,
+            target_file,
+            output,
+            format,
+        } => {
+            let document = SemanticNameDocument::read(&document)?;
+            let target_text = fs::read_to_string(&target_file)?;
+            let target = analyze_source(&target_file)?;
+            reject_input_overwrite(&target_file, &output)?;
+            let rendered = render::render_semantic_names(
+                &document,
+                &target,
+                &target_text,
+                parse_render_format(&format)?,
+            )?;
+            render::write_output(&output, &rendered)?;
+            println!(
+                "{}",
+                serde_json::json!({"rendered": true, "bytes": rendered.len()})
+            );
+        }
+    }
+    Ok(())
+}
+
+fn parse_render_format(value: &str) -> Result<render::RenderFormat> {
+    match value {
+        "pretty" => Ok(render::RenderFormat::Pretty),
+        "preserve" => Ok(render::RenderFormat::Preserve),
+        _ => anyhow::bail!("unsupported render format {value:?}"),
+    }
+}
+
+fn reject_input_overwrite(input: &std::path::Path, output: &std::path::Path) -> Result<()> {
+    let input = fs::canonicalize(input)?;
+    let output = match fs::canonicalize(output) {
+        Ok(path) => path,
+        Err(_) => {
+            let parent = output.parent().unwrap_or_else(|| std::path::Path::new("."));
+            fs::canonicalize(parent)?.join(
+                output
+                    .file_name()
+                    .ok_or_else(|| anyhow::anyhow!("rendered output has no file name"))?,
+            )
+        }
+    };
+    if input == output {
+        anyhow::bail!("rendered output must be a separate path from the target input");
     }
     Ok(())
 }
