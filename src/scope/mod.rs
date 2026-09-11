@@ -670,38 +670,144 @@ impl ScopeAnalyzer {
             .unwrap_or_else(|| "global".to_string())
     }
 
-    pub fn child_scope_for_node(&self, parent_scope_id: &str, node: Node) -> Option<String> {
-        self.scopes
-            .values()
-            .find(|scope| {
-                scope.parent.as_deref() == Some(parent_scope_id)
-                    && scope.start_byte == node.start_byte()
-                    && scope.end_byte == node.end_byte()
-            })
-            .map(|scope| scope.id.clone())
-    }
-
     pub fn get_scopes(&self) -> &HashMap<String, Scope> {
         &self.scopes
     }
 
-    pub fn find_variable(&self, name: &str, from_scope_id: &str) -> Option<(String, &Variable)> {
-        let mut current_scope_id = from_scope_id;
+    pub fn resolved_identifiers<'a>(
+        &self,
+        node: Node<'a>,
+        source: &str,
+    ) -> Vec<IdentifierInfo<'a>> {
+        let index = BindingIndex::new(&self.scopes);
+        let mut output = Vec::new();
+        Self::collect_identifiers(node, source, "global", &index, &mut output);
+        output
+    }
 
-        while let Some(scope) = self.scopes.get(current_scope_id) {
-            if let Some(var) = scope.variables.iter().find(|v| v.name == name) {
-                return Some((current_scope_id.to_string(), var));
-            }
-
-            if let Some(parent) = &scope.parent {
-                current_scope_id = parent;
-            } else {
-                break;
+    fn collect_identifiers<'a>(
+        node: Node<'a>,
+        source: &str,
+        scope: &str,
+        index: &BindingIndex<'_>,
+        output: &mut Vec<IdentifierInfo<'a>>,
+    ) {
+        if matches!(
+            node.kind(),
+            "identifier"
+                | "shorthand_property_identifier"
+                | "shorthand_property_identifier_pattern"
+        ) {
+            let text = &source[node.byte_range()];
+            let owner = index
+                .declarations
+                .get(&node.start_byte())
+                .copied()
+                .or_else(|| {
+                    is_lexical_reference(node)
+                        .then(|| index.resolve(text, scope))
+                        .flatten()
+                });
+            if let Some((scope_id, variable)) = owner {
+                output.push(IdentifierInfo {
+                    node,
+                    text: text.to_string(),
+                    scope_id: scope_id.to_string(),
+                    declaration_byte: variable.declaration_byte,
+                });
             }
         }
-
-        None
+        let child_scope = index
+            .children
+            .get(&(scope, node.start_byte(), node.end_byte()));
+        for child in node.children(&mut node.walk()) {
+            Self::collect_identifiers(
+                child,
+                source,
+                child_scope.copied().unwrap_or(scope),
+                index,
+                output,
+            );
+        }
     }
+}
+
+#[derive(Debug)]
+pub struct IdentifierInfo<'a> {
+    pub node: Node<'a>,
+    pub text: String,
+    pub scope_id: String,
+    pub declaration_byte: usize,
+}
+
+struct BindingIndex<'a> {
+    declarations: HashMap<usize, (&'a str, &'a Variable)>,
+    names: HashMap<&'a str, HashMap<&'a str, &'a Variable>>,
+    scopes: &'a HashMap<String, Scope>,
+    children: HashMap<(&'a str, usize, usize), &'a str>,
+}
+
+impl<'a> BindingIndex<'a> {
+    fn new(scopes: &'a HashMap<String, Scope>) -> Self {
+        let mut index = Self {
+            declarations: HashMap::new(),
+            names: HashMap::new(),
+            scopes,
+            children: HashMap::new(),
+        };
+        for scope in scopes.values() {
+            let names = index.names.entry(scope.id.as_str()).or_default();
+            for variable in &scope.variables {
+                index
+                    .declarations
+                    .insert(variable.declaration_byte, (&scope.id, variable));
+                names.entry(&variable.name).or_insert(variable);
+            }
+            if let Some(parent) = &scope.parent {
+                index.children.insert(
+                    (parent.as_str(), scope.start_byte, scope.end_byte),
+                    &scope.id,
+                );
+            }
+        }
+        index
+    }
+
+    fn resolve(&self, name: &str, from_scope: &str) -> Option<(&'a str, &'a Variable)> {
+        let mut scope = self.scopes.get(from_scope)?;
+        loop {
+            if let Some(variable) = self
+                .names
+                .get(scope.id.as_str())
+                .and_then(|names| names.get(name))
+            {
+                return Some((&scope.id, variable));
+            }
+            scope = self.scopes.get(scope.parent.as_ref()?)?;
+        }
+    }
+}
+
+pub(crate) fn is_lexical_reference(node: Node<'_>) -> bool {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        if parent.kind() == "import_statement" {
+            return false;
+        }
+        if parent.kind() == "export_specifier"
+            && parent.child_by_field_name("alias") == Some(current)
+        {
+            return false;
+        }
+        if !matches!(
+            parent.kind(),
+            "parenthesized_expression" | "export_specifier"
+        ) {
+            break;
+        }
+        current = parent;
+    }
+    true
 }
 
 #[cfg(test)]

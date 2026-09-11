@@ -1,17 +1,11 @@
-//! Language-neutral analysis data and persistence.
+//! Language-neutral in-memory analysis data.
 //!
-//! The current JavaScript diff remains independent of this module.  This is
-//! the first Phase-5 adapter: it records the complete tree shape, lexical
+//! Used by lineage and naming. The JavaScript adapter
+//! records the complete tree shape, lexical
 //! scopes, declarations, stable artifact-local identities, provenance, and an
 //! explicit loss report in deterministic column order.
 
-mod cache;
 mod javascript;
-
-pub use cache::{
-    AnalysisCacheView, CachedCall, CachedDefUse, CachedLoss, CachedNode, CachedReference,
-    CachedScope, CachedSymbol, MappedAnalysis,
-};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -25,7 +19,7 @@ use crate::scope::{ScopeAnalyzer, ScopeType};
 
 /// Version of the language-neutral analysis model.
 pub const ANALYSIS_VERSION: u32 = 1;
-/// Identity of the first persisted analysis profile.
+/// Identity of the first analysis profile.
 pub const ANALYSIS_PROFILE: &str = "astdiff.analysis.v1";
 /// Parser identity pinned by this adapter.
 pub const JAVASCRIPT_FRONTEND: &str = "tree-sitter-javascript";
@@ -63,8 +57,7 @@ impl Serialize for StableId {
     }
 }
 
-/// Supported source-language identities.  The persisted numeric value is an
-/// explicit contract rather than a Rust enum discriminant.
+/// Supported source-language identities with explicit numeric codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Language {
@@ -328,8 +321,7 @@ impl Analysis {
         Ok(analysis)
     }
 
-    /// Validate application-level relationships which Isoform's structural
-    /// verifier intentionally cannot know about.
+    /// Validate row relationships, identity derivation, and source bounds.
     pub fn validate(&self) -> Result<()> {
         if self.version != ANALYSIS_VERSION
             || self.profile != ANALYSIS_PROFILE

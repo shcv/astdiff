@@ -2,21 +2,20 @@
 #+OPTIONS: toc:nil
 
 =astdiff= parses JavaScript, provides a legacy structural declaration diff,
-emits a verified positioned analysis IR, matches symbol lineage between exact
+builds a validated in-memory analysis IR, matches symbol lineage between exact
 analysis identities, maintains reviewable semantic-name state, and can render
 an immutable target input into a separate renamed/pretty-printed artifact.
 
 The authoritative component contracts are:
 
 - =README.md=: supported commands and user-facing behavior;
-- =docs/analysis-ir.org=: analysis model, positioned cache, identities, and
+- =docs/analysis-ir.org=: analysis model, identities, and
   verification boundary;
 - =docs/lineage.org=: bounded structural matching and semantic-name review;
 - =docs/corpus-plan.org=: generic generated/public/external evaluation plan;
 - =spec/comprehensive-dump-format.md=: current legacy dump boundary and its
   explicitly proposed extensions; and
-- =schemas/analysis-v1.json= plus =schemas/analysis-v1.isf=: canonical
-  analysis schema source and generated artifact.
+- =docs/source-map.org=: raw source-map validation, lookup, and lineage evidence.
 
 The line-oriented mapping format used by =astdiff canon --map= is a legacy
 canonicalization interface.  It is keyed by canonical spelling and must not

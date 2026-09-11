@@ -6,8 +6,6 @@ use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-pub mod cache;
-
 #[derive(Debug, Clone, Copy)]
 pub struct SourceMapLimits {
     pub max_bytes: usize,

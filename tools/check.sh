@@ -13,8 +13,6 @@ export TMPDIR="$repo_dir/target/tmp"
 cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
-tools/analysis-schema.sh check
-tools/sourcemap-schema.sh check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 shellcheck tools/*.sh
 git diff --check

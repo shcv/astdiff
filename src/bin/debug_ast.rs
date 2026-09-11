@@ -1,4 +1,4 @@
-use tree_sitter::{Node, Parser};
+use tree_sitter::Node;
 
 fn print_tree(node: Node, source: &str, indent: usize) {
     let node_text = if node.child_count() == 0 && node.byte_range().len() < 50 {
@@ -55,16 +55,13 @@ fn print_tree(node: Node, source: &str, indent: usize) {
     }
 }
 
-fn main() {
-    let source = r#"import * as WbB from "path";"#;
-    println!("Source: {}", source);
-    println!("---");
-
-    let mut parser = Parser::new();
-    parser
-        .set_language(tree_sitter_javascript::language())
-        .unwrap();
-
-    let tree = parser.parse(source, None).unwrap();
-    print_tree(tree.root_node(), source, 0);
+fn main() -> anyhow::Result<()> {
+    let path = std::env::args_os()
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("usage: debug_ast FILE.js"))?;
+    let source = std::fs::read_to_string(path)?;
+    let mut parser = astdiff::parser::JsParser::new()?;
+    let tree = parser.parse(&source)?;
+    print_tree(tree.root_node(), &source, 0);
+    Ok(())
 }

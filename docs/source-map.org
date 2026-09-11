@@ -28,10 +28,6 @@ astdiff map lookup bundle.js.map --line 12 --column 8
 astdiff map compose-lookup generated-to-mid.map mid-to-source.map \
   --line 12 --column 8
 
-# Persist and query a regular map through the verified positioned sidecar.
-astdiff map cache bundle.js.map bundle.js --output bundle.astsm
-astdiff map cache-validate bundle.astsm bundle.js
-astdiff map cache-lookup bundle.astsm bundle.js --line 12 --column 8
 #+end_src
 
 Default JSON returns mapping status, coordinate basis, and source/name indexes.
@@ -64,15 +60,9 @@ map-level =file= URL and therefore does not infer that identity.
 
 * Persistence and lineage boundary
 
-Regular maps can be persisted in the separate
-=astdiff.sourcemap.v3.positioned= Isoform =.astsm= sidecar without changing
-=astdiff.analysis.v1=.  Its envelope binds the exact layout hash, raw-map
-digest, normalized payload digest, and generated-source digest.  After one
-bounded full verification pass, a line directory provides O(1) line slicing
-and lookup uses binary search within or before the requested line.  Indexed
-maps remain queryable in memory but are rejected by this sidecar profile until
-a canonical section-table representation is defined.  A reverse
-original-to-generated index is also not materialized yet.
+The experimental Isoform =.astsm= sidecar and its cache commands are maintained
+on the separate =isoform-cache= branch. Master queries regular and indexed
+maps directly in memory and has no Isoform dependency.
 
 Lineage consumes an explicitly supplied map as an independent evidence
 component without requiring a persisted sidecar.  It binds both raw-map

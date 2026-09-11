@@ -1,10 +1,5 @@
-use super::fingerprint::{
-    self, calculate_fingerprint_similarity, FunctionFingerprint, RarityScorer,
-};
-use super::matching_report::EvidenceBreakdown;
-use super::{
-    Change, ChangeType, DeclarationData, DeclarationKind, DiffClassification, MINHASH_LANES,
-};
+use super::fingerprint::{calculate_fingerprint_similarity, RarityScorer};
+use super::{Change, ChangeType, Declaration, DeclarationKind, DiffClassification, MINHASH_LANES};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,10 +11,9 @@ const LSH_SIMILARITY_THRESHOLD: f64 = 0.3;
 
 /// Lanes compared before the gate checks whether the pair is still reachable.
 ///
-/// Must divide MINHASH_LANES, otherwise the tail lanes would go uncompared; the
-/// gate checks that at runtime and falls back to the general path if it ever stops
-/// holding.
+/// Divisibility is checked at compile time; signatures have a fixed width.
 const LSH_GATE_BLOCK_LANES: usize = 32;
+const _: () = assert!(MINHASH_LANES.is_multiple_of(LSH_GATE_BLOCK_LANES));
 
 /// Smallest number of agreeing lanes that clears LSH_SIMILARITY_THRESHOLD.
 ///
@@ -50,7 +44,7 @@ const fn min_matching_lanes(lanes: usize, threshold: f64) -> usize {
 
 /// One decls2 entry as the window scan sees it, in sorted2 order.
 ///
-/// The scan touches this instead of the full DeclarationData, which is ~200 bytes
+/// The scan touches this instead of the full Declaration, which is ~200 bytes
 /// and drags a String heap allocation in behind every probe. Everything the scan
 /// decides on lives here, so a rejected pair costs one sequential read.
 struct Decl2Probe {
@@ -58,10 +52,6 @@ struct Decl2Probe {
     name_id: u32,
     i2: u32,
     kind: DeclarationKind,
-    /// False when this declaration's signature is not MINHASH_LANES long, in which
-    /// case it has no slot in the flat signature buffer and the scan reads the
-    /// declaration's own signature.
-    has_flat_signature: bool,
 }
 
 /// A pair that survived LSH filtering.
@@ -82,17 +72,14 @@ pub struct SimilarityResult {
     pub i1: usize,
     pub i2: usize,
     pub similarity: f64,
-    pub evidence_count: usize,
-    pub evidence_breakdown: Option<EvidenceBreakdown>,
-    pub name_match: bool, // True if names match exactly
 }
 
-pub struct ParallelMatcherV2 {
+pub struct ParallelMatcher {
     use_fingerprints: bool,
     batch_size: usize,
 }
 
-impl ParallelMatcherV2 {
+impl ParallelMatcher {
     pub fn new(use_fingerprints: bool) -> Self {
         Self {
             use_fingerprints,
@@ -103,20 +90,11 @@ impl ParallelMatcherV2 {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn match_declarations(
         &self,
-        decls1: &[DeclarationData],
-        decls2: &[DeclarationData],
+        decls1: &[Declaration],
+        decls2: &[Declaration],
         source1: &str,
         source2: &str,
         scorer: Option<&RarityScorer>,
-        calculate_similarity: impl Fn(&DeclarationData, &DeclarationData, &str, &str) -> f64 + Sync,
-        create_evidence: impl Fn(
-                &DeclarationData,
-                &DeclarationData,
-                &FunctionFingerprint,
-                &FunctionFingerprint,
-                &RarityScorer,
-            ) -> EvidenceBreakdown
-            + Sync,
     ) -> (
         Vec<(usize, usize, f64)>,
         Vec<Change>,
@@ -139,18 +117,10 @@ impl ParallelMatcherV2 {
         // Step 3: Parallel full similarity calculation for remaining candidates
         let similarity_results = {
             let _timer = Timer::new("parallel_full_similarity");
-            self.parallel_full_similarity(
-                &lsh_candidates,
-                decls1,
-                decls2,
-                source1,
-                source2,
-                scorer,
-                &calculate_similarity,
-                &create_evidence,
-            )
+            self.parallel_full_similarity(&lsh_candidates, decls1, decls2, scorer)
         };
 
+        drop(lsh_candidates);
         // Step 4: Resolve best matches + normalize/diff all pairs
         let (matches, changes, rename_map) = {
             let _timer = Timer::new("resolve_matches");
@@ -182,8 +152,8 @@ impl ParallelMatcherV2 {
     /// order here decides tie-breaks and therefore the final diff.
     fn build_and_filter_candidates(
         &self,
-        decls1: &[DeclarationData],
-        decls2: &[DeclarationData],
+        decls1: &[Declaration],
+        decls2: &[Declaration],
     ) -> Vec<CandidateMatch> {
         // Sort declarations by size for efficient window search
         let mut sorted2: Vec<(usize, usize)> = decls2
@@ -224,24 +194,12 @@ impl ParallelMatcherV2 {
         // reads them front to back. Each declaration otherwise owns its own ~1 KB
         // allocation, which turns the scan into one random pointer chase per probe over a
         // working set far larger than cache.
-        let signature_capacity = sorted2
-            .len()
-            .checked_mul(MINHASH_LANES)
-            .expect("MinHash signature capacity overflow");
-        let mut flat_signatures: Vec<u64> = Vec::with_capacity(signature_capacity);
+        let mut flat_signatures = Vec::with_capacity(sorted2.len());
         let mut probes: Vec<Decl2Probe> = Vec::with_capacity(sorted2.len());
 
         for &(i2, size) in &sorted2 {
             let decl2 = &decls2[i2];
-            let has_flat_signature = decl2.minhash_signature.len() == MINHASH_LANES;
-
-            // The stride stays fixed so `idx` alone locates a signature; an odd-length
-            // signature keeps its slot as padding and is read from the declaration.
-            if has_flat_signature {
-                flat_signatures.extend_from_slice(&decl2.minhash_signature);
-            } else {
-                flat_signatures.resize(flat_signatures.len() + MINHASH_LANES, 0);
-            }
+            flat_signatures.push(decl2.minhash_signature);
 
             let name_id = *name_ids.entry(decl2.name.as_str()).or_insert_with(|| {
                 let id = next_name_id;
@@ -254,7 +212,6 @@ impl ParallelMatcherV2 {
                 name_id,
                 i2: u32::try_from(i2).expect("astdiff supports at most u32::MAX declarations"),
                 kind: decl2.kind.clone(),
-                has_flat_signature,
             });
         }
 
@@ -305,11 +262,7 @@ impl ParallelMatcherV2 {
 
                     local_examined += 1;
 
-                    let sig2: &[u64] = if probe.has_flat_signature {
-                        &flat_signatures[idx * MINHASH_LANES..(idx + 1) * MINHASH_LANES]
-                    } else {
-                        &decls2[probe.i2 as usize].minhash_signature
-                    };
+                    let sig2 = &flat_signatures[idx];
 
                     if passes_lsh_gate(&decl1.minhash_signature, sig2) {
                         local_results.push(CandidateMatch {
@@ -347,20 +300,9 @@ impl ParallelMatcherV2 {
     fn parallel_full_similarity(
         &self,
         candidates: &[CandidateMatch],
-        decls1: &[DeclarationData],
-        decls2: &[DeclarationData],
-        source1: &str,
-        source2: &str,
+        decls1: &[Declaration],
+        decls2: &[Declaration],
         scorer: Option<&RarityScorer>,
-        calculate_similarity: &(impl Fn(&DeclarationData, &DeclarationData, &str, &str) -> f64 + Sync),
-        create_evidence: &(impl Fn(
-            &DeclarationData,
-            &DeclarationData,
-            &FunctionFingerprint,
-            &FunctionFingerprint,
-            &RarityScorer,
-        ) -> EvidenceBreakdown
-              + Sync),
     ) -> Vec<SimilarityResult> {
         let progress = AtomicUsize::new(0);
         let total = candidates.len();
@@ -375,30 +317,25 @@ impl ParallelMatcherV2 {
                     let decl1 = &decls1[candidate.i1 as usize];
                     let decl2 = &decls2[candidate.i2 as usize];
 
-                    let (similarity, evidence_count, evidence_breakdown) = if self.use_fingerprints
-                    {
-                        if let (Some(ref fp1), Some(ref fp2), Some(s)) =
-                            (&decl1.fingerprint, &decl2.fingerprint, scorer)
-                        {
-                            let (fp_score, ev_count) =
-                                calculate_fingerprint_similarity(fp1, fp2, s);
-                            let breakdown = create_evidence(decl1, decl2, fp1, fp2, s);
-                            let struct_sim = calculate_similarity(decl1, decl2, source1, source2);
-                            let combined = fp_score * 0.7 + struct_sim * 0.3;
-                            (combined, ev_count, Some(breakdown))
-                        } else {
+                    let (similarity, evidence_count) = match (
+                        self.use_fingerprints,
+                        &decl1.fingerprint,
+                        &decl2.fingerprint,
+                        scorer,
+                    ) {
+                        (true, Some(fp1), Some(fp2), Some(scorer)) => {
+                            let (score, count) = calculate_fingerprint_similarity(fp1, fp2, scorer);
+                            if !candidate.name_match
+                                && !should_match_with_score(score * 0.7 + 0.3, count, decl1.size)
+                            {
+                                continue;
+                            }
                             (
-                                calculate_similarity(decl1, decl2, source1, source2),
-                                0,
-                                None,
+                                score * 0.7 + super::declaration_similarity(decl1, decl2) * 0.3,
+                                count,
                             )
                         }
-                    } else {
-                        (
-                            calculate_similarity(decl1, decl2, source1, source2),
-                            0,
-                            None,
-                        )
+                        _ => (super::declaration_similarity(decl1, decl2), 0),
                     };
 
                     // Apply thresholds - always include name matches
@@ -409,9 +346,6 @@ impl ParallelMatcherV2 {
                             i1: candidate.i1 as usize,
                             i2: candidate.i2 as usize,
                             similarity,
-                            evidence_count,
-                            evidence_breakdown,
-                            name_match: candidate.name_match,
                         });
                     }
                 }
@@ -448,8 +382,8 @@ impl ParallelMatcherV2 {
     fn resolve_best_matches(
         &self,
         mut results: Vec<SimilarityResult>,
-        decls1: &[DeclarationData],
-        decls2: &[DeclarationData],
+        decls1: &[Declaration],
+        decls2: &[Declaration],
         source1: &str,
         source2: &str,
     ) -> (
@@ -476,19 +410,25 @@ impl ParallelMatcherV2 {
 
         // ── Phase A: Greedy matching + build rename map ──
         let mut rename_map: HashMap<String, String> = HashMap::new();
-        let mut match_data: Vec<(usize, usize, f64)> = Vec::new(); // (i1, i2, similarity)
+        let mut source_symbols = HashMap::new();
+        let mut target_symbols = HashMap::new();
 
         for result in &results {
             if !matched1[result.i1] && !matched2[result.i2] {
                 matched1[result.i1] = true;
                 matched2[result.i2] = true;
                 matches.push((result.i1, result.i2, result.similarity));
-                match_data.push((result.i1, result.i2, result.similarity));
 
                 let decl1 = &decls1[result.i1];
                 let decl2 = &decls2[result.i2];
 
-                // Build rename map inline: new_name → old_name
+                if let (Some(source), Some(target)) =
+                    (decl1.comparison.symbol, decl2.comparison.symbol)
+                {
+                    source_symbols.insert(source, source);
+                    target_symbols.insert(target, source);
+                }
+                // Export declaration names for the human-facing mapping.
                 if decl1.name != decl2.name {
                     rename_map.insert(decl2.name.clone(), decl1.name.clone());
                 }
@@ -506,66 +446,33 @@ impl ParallelMatcherV2 {
         let mut string_only_count = 0usize;
         let mut structural_count = 0usize;
 
-        for &(i1, i2, similarity) in &match_data {
+        drop(results);
+        for &(i1, i2, similarity) in &matches {
             let decl1 = &decls1[i1];
             let decl2 = &decls2[i2];
 
             // Extract source for both declarations
-            let src1 = super::extract_source_bytes(source1, decl1.start_byte, decl1.end_byte);
-            let src2 = super::extract_source_bytes(source2, decl2.start_byte, decl2.end_byte);
+            let src1 = &source1[decl1.start_byte..decl1.end_byte];
+            let src2 = &source2[decl2.start_byte..decl2.end_byte];
 
-            if src1.is_empty() || src2.is_empty() {
-                // Can't extract source — skip diffing
-                if decl1.name != decl2.name {
-                    changes.push(create_classified_change(
-                        ChangeType::Modification,
-                        Some(create_location_with_lines(decl1, &lines1)),
-                        Some(create_location_with_lines(decl2, &lines2)),
-                        format!(
-                            "{} '{}' matched with '{}' (was '{}')",
-                            kind_to_string(&decl1.kind),
-                            decl2.name,
-                            decl1.name,
-                            decl1.name
-                        ),
-                        format!("global.{}->{}", decl1.name, decl2.name),
-                        DiffClassification::Unchanged,
-                        String::new(),
-                        Some(similarity),
-                    ));
-                    unchanged_count += 1;
-                }
-                continue;
-            }
-
-            // Normalize pipeline (order matters — keywords must survive for stripping):
-            // 1. Comparison normalization on RAW source (canonicalize imports, strip
-            //    var/let/const, strip trailing punct, collapse whitespace)
-            // 2. Apply rename map to pre-normalized source2
-            // 3. Blank minified identifiers on both
-            let is_import = matches!(decl1.kind, DeclarationKind::Import);
-            let pre_s1 = fingerprint::normalize_javascript_identifiers(src1, &HashMap::new());
-            let pre_s2 = fingerprint::normalize_javascript_identifiers(src2, &rename_map);
-            let comp_s1 = fingerprint::normalize_for_comparison(&pre_s1, is_import);
-            let comp_s2 = fingerprint::normalize_for_comparison(&pre_s2, is_import);
-
-            // Compare after syntax-aware identifier normalization.
-            if comp_s1 == comp_s2 {
+            let left = decl1.comparison.normalize(&source_symbols);
+            let right = decl2.comparison.normalize(&target_symbols);
+            if left.equal(&right) {
                 unchanged_count += 1;
                 continue;
             }
-
-            // Generate display diff using comparison normalization for LCS alignment
-            let display_diff =
-                StructuralDiff::generate_normalized_display_diff(src1, src2, &comp_s1, &comp_s2, 3);
-
-            if display_diff.is_empty() {
-                unchanged_count += 1;
-                continue;
-            }
-
-            // Classify: string-only vs structural
-            let classification = fingerprint::classify_diff_lines(&display_diff);
+            let classification = if left.equal_ignoring_strings(&right) {
+                DiffClassification::StringOnly
+            } else {
+                DiffClassification::Structural
+            };
+            let display_diff = StructuralDiff::generate_normalized_display_diff(
+                src1,
+                src2,
+                &left.lines(),
+                &right.lines(),
+                3,
+            );
 
             let desc = if decl1.name != decl2.name {
                 match classification {
@@ -670,30 +577,8 @@ fn kinds_are_compatible(kind1: &DeclarationKind, kind2: &DeclarationKind) -> boo
 
 // Helper functions
 
-fn estimate_minhash_similarity(sig1: &[u64], sig2: &[u64]) -> f64 {
-    let matches = sig1.iter().zip(sig2).filter(|(a, b)| a == b).count();
-    matches as f64 / sig1.len() as f64
-}
-
-/// Whether a pair's MinHash signatures agree on enough lanes to stay a candidate.
-///
-/// Equivalent to `estimate_minhash_similarity(sig1, sig2) >= LSH_SIMILARITY_THRESHOLD`,
-/// but it never finishes counting a pair that has already lost: after each block the
-/// lanes still uncompared are added to the count as if all of them agreed, and if even
-/// that best case falls short the pair is rejected. On real input most pairs die in the
-/// first block, which is most of the 230 million pair scan.
-///
-/// Signatures of any other length go through the original division, so a future change
-/// to the lane count cannot silently change which pairs survive.
-fn passes_lsh_gate(sig1: &[u64], sig2: &[u64]) -> bool {
-    let blocked = sig1.len() == MINHASH_LANES
-        && sig2.len() == MINHASH_LANES
-        && MINHASH_LANES.is_multiple_of(LSH_GATE_BLOCK_LANES);
-
-    if !blocked {
-        return estimate_minhash_similarity(sig1, sig2) >= LSH_SIMILARITY_THRESHOLD;
-    }
-
+/// Fixed-width signatures and the compile-time block invariant leave one gate.
+fn passes_lsh_gate(sig1: &[u64; MINHASH_LANES], sig2: &[u64; MINHASH_LANES]) -> bool {
     let mut matching = 0usize;
     let mut uncompared = MINHASH_LANES;
 
@@ -775,7 +660,7 @@ fn create_classified_change(
     }
 }
 
-fn create_location_with_lines(decl: &DeclarationData, lines: &[&str]) -> super::Location {
+fn create_location_with_lines(decl: &Declaration, lines: &[&str]) -> super::Location {
     const MAX_SNIPPET_CHARS: usize = 200;
     let snippet = if decl.line > 0 && decl.line <= lines.len() {
         let line = lines[decl.line - 1].trim();
@@ -812,28 +697,21 @@ fn kind_to_string(kind: &DeclarationKind) -> &'static str {
 mod tests {
     use super::*;
 
-    fn signatures_with_matches(matches: usize, lanes: usize) -> (Vec<u64>, Vec<u64>) {
-        let left: Vec<u64> = (0..lanes as u64).collect();
-        let mut right = left.clone();
-        for value in &mut right[matches..] {
-            *value += lanes as u64;
+    #[test]
+    fn lsh_gate_matches_the_reference_for_every_agreement_count() {
+        let left = std::array::from_fn(|i| i as u64);
+        for count in 0..=MINHASH_LANES {
+            let right = std::array::from_fn(|i| {
+                if i < count {
+                    i as u64
+                } else {
+                    (i + MINHASH_LANES) as u64
+                }
+            });
+            assert_eq!(
+                passes_lsh_gate(&left, &right),
+                count as f64 / MINHASH_LANES as f64 >= LSH_SIMILARITY_THRESHOLD
+            );
         }
-        (left, right)
-    }
-
-    #[test]
-    fn lsh_gate_has_the_same_128_lane_threshold() {
-        let (left, right) = signatures_with_matches(38, MINHASH_LANES);
-        assert!(!passes_lsh_gate(&left, &right));
-        let (left, right) = signatures_with_matches(39, MINHASH_LANES);
-        assert!(passes_lsh_gate(&left, &right));
-    }
-
-    #[test]
-    fn lsh_gate_falls_back_for_nonstandard_signature_lengths() {
-        let (left, right) = signatures_with_matches(3, 10);
-        assert!(passes_lsh_gate(&left, &right));
-        let (left, right) = signatures_with_matches(2, 10);
-        assert!(!passes_lsh_gate(&left, &right));
     }
 }

@@ -14,7 +14,7 @@ A high-performance AST-based structural diff tool for JavaScript that intelligen
 - **Multiple Output Formats**: Detailed unified, summary, compact, and JSON outputs
 - **Rename Exports**: Save detected old-to-new declaration names as YAML
 - **Validated Dumps**: Save and inspect versioned analysis results with integrity checks
-- **Positioned Analysis IR**: Persist deterministic, language-neutral AST/scope/symbol columns for mmap-backed O(1) fixed-row queries after verification
+- **Analysis IR**: Deterministic, language-neutral AST/scope/symbol data shared by lineage and naming
 - **Version Lineage**: Match symbols through identifier-erased structural context with bounded candidate indexes, two-sided margins, and explicit abstention
 - **Semantic Name Review**: Export strict bounded JSON, record audited suggestions and approvals, and propagate only approved labels
 - **Source Map v3 Queries**: Strict bounded VLQ validation, indexed lookup, and two-map position composition with redacted output defaults
@@ -89,37 +89,22 @@ astdiff query comparison.astdump validate v1.js v2.js
 astdiff load comparison.astdump
 ```
 
-### Language-neutral analysis artifacts
+### Language-neutral analysis
 
-Build a deterministic Phase-5 analysis artifact from JavaScript, then query
-its verified mmap-backed columns. Opening checks the fixed envelope, schema
-layout hash, recorded source digest, and payload digest; `analysis` performs
-one full Isoform verification pass before any borrowed access. Library callers
-that also have the current source bytes can use `MappedAnalysis::open_for_source`
-to bind the cache to those exact bytes.
+The in-memory `Analysis::from_javascript` adapter records the syntax tree,
+lexical scopes and bindings, resolved identifier references, call shapes,
+artifact-local IDs, provenance, and explicit unsupported features. Comparison
+uses resolved bindings to recognize local renames while retaining changes to
+unresolved globals, property names, imported keys, and string contents.
 
-```bash
-astdiff analyze input.js --output input.astir
-astdiff analysis input.astir summary
-astdiff analysis input.astir node 0
-astdiff analysis input.astir symbol 0
-astdiff analysis input.astir reference 0
-astdiff analysis input.astir def-use 0
-astdiff analysis input.astir call 0
-astdiff analysis input.astir string 0
-astdiff analysis input.astir loss 0
-```
+Temporal-dead-zone and flow-sensitive resolution, dynamic call targets, and
+matcher fingerprints remain listed as analysis losses. See
+[the Analysis IR v1 contract](docs/analysis-ir.org).
 
-The v1 adapter records the complete tree shape, lexical scopes, nested lexical
-bindings, identifier references, def-use resolution, direct/member/constructor
-call shapes, artifact-local stable IDs, provenance, and explicit unsupported
-features. Temporal-dead-zone and flow-sensitive resolution, dynamic call
-targets, and matcher fingerprints remain listed as losses rather than being
-silently omitted. Structural lineage can consume source-map evidence only
-through an explicit paired source/target map invocation.
-
-See [the Analysis IR v1 contract](docs/analysis-ir.org) for identity, encoding,
-trust-boundary, and compatibility details.
+Isoform-backed analysis and source-map caches are experimental and maintained
+on the separate `isoform-cache` branch. Master builds without Isoform or a
+sibling checkout; its analysis, lineage, naming, and raw source-map queries
+operate in memory.
 
 ### Version lineage and semantic names
 
@@ -169,9 +154,7 @@ The staged path from generated fixtures through reproducible public histories
 to optional externally provisioned lineage corpora is documented in
 [the corpus plan](docs/corpus-plan.org).
 
-Run `tools/benchmark-analysis.sh INPUT.js RUNS` to measure deterministic
-artifact generation and the mandatory map/verify pass on a representative
-bundle. Run `tools/benchmark-lineage.sh OLD.js NEW.js RUNS` to record matcher
+Run `tools/benchmark-lineage.sh OLD.js NEW.js RUNS` to record matcher
 latency, candidate reduction, expensive comparisons, decisions, truncations,
 and deterministic report digests.
 
@@ -182,11 +165,6 @@ and deterministic report digests.
 astdiff map validate bundle.js.map
 astdiff map lookup bundle.js.map --line 12 --column 8
 astdiff map compose-lookup generated-to-mid.map mid-to-source.map --line 12 --column 8
-
-# Persist/query a regular map in the verified positioned cache
-astdiff map cache bundle.js.map bundle.js --output bundle.astsm
-astdiff map cache-validate bundle.astsm bundle.js
-astdiff map cache-lookup bundle.astsm bundle.js --line 12 --column 8
 
 # Canonicalize JavaScript (normalize variable names)
 astdiff canon input.js
@@ -212,7 +190,7 @@ indexes by default. See [the Source Map v3 contract](docs/source-map.org).
 2. **Declaration Extraction**: Identifies all functions, variables, classes, imports, and exports
 3. **Structural Hashing**: Creates hash signatures for each declaration's AST structure
 4. **MinHash Signatures**: Generates compact signatures for efficient similarity estimation
-5. **Fingerprinting**: Extracts semantic features (strings, constants, API calls) for better matching
+5. **Optional Fingerprinting**: With `--fingerprints`, extracts strings, constants, and API calls as matching evidence
 6. **Parallel Matching**: Uses parallel algorithms to find best legacy diff matches between declarations
 7. **Change Detection**: Identifies additions, deletions, modifications, and renames
 
@@ -247,12 +225,9 @@ Changes: 18 additions, 7 deletions, 10 modifications (+ 7206 renames)
 ## Building from Source
 
 Requirements:
-- Rust 1.70+
-- C++ compiler (for tree-sitter)
-- The joint-development Isoform checkout configured in `Cargo.toml`. The
-  checked-in analysis schema artifact must be regenerated with that checkout's
-  schema-artifact version. A reproducibly pinned release or vendored source is
-  required before publishing independently.
+
+- Current stable Rust
+- A C compiler (for tree-sitter)
 
 ```bash
 git clone https://github.com/shcv/astdiff

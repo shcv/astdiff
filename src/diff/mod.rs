@@ -1,17 +1,17 @@
 use anyhow::Result;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use tree_sitter::{Node, Tree};
+use tree_sitter::Node;
 
+mod alpha;
 pub mod fingerprint;
-pub mod matching_report;
-pub mod parallel_matching_v2;
+mod parallel_matching;
 pub mod profiling;
 
 use fingerprint::*;
-use matching_report::*;
 
 pub(crate) const MINHASH_LANES: usize = 128;
 
@@ -34,18 +34,19 @@ pub struct Declaration {
     pub end_line: usize,
     pub start_byte: usize,
     pub end_byte: usize,
-    pub node_kind: String,
+    pub node_kind: &'static str,
     pub signature: String,
     /// Sorted and deduplicated. Both consumers (MinHash, intersection count) are
     /// order-independent, and sequential u64s intersect far faster than a hash set
     /// whose RandomState re-hashes values that are already uniformly distributed.
     pub structural_hashes: Vec<u64>,
     pub size: usize,
-    pub minhash_signature: Vec<u64>,
+    pub minhash_signature: [u64; MINHASH_LANES],
     pub fingerprint: Option<FunctionFingerprint>,
+    pub(crate) comparison: alpha::Tokens,
 }
 
-// Serializable version (same fields now that Node is gone)
+// Serializable representation preserves the existing dump contract.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SerializableDeclaration {
     pub name: String,
@@ -75,42 +76,8 @@ impl From<&Declaration> for SerializableDeclaration {
             // bincode format on disk and existing dumps must stay loadable.
             structural_hashes: decl.structural_hashes.iter().copied().collect(),
             size: decl.size,
-            minhash_signature: decl.minhash_signature.clone(),
+            minhash_signature: decl.minhash_signature.to_vec(),
             fingerprint: decl.fingerprint.clone(),
-        }
-    }
-}
-
-// Thread-safe declaration data for parallel processing
-#[derive(Debug, Clone)]
-pub struct DeclarationData {
-    name: String,
-    kind: DeclarationKind,
-    line: usize,
-    end_line: usize,
-    start_byte: usize,
-    end_byte: usize,
-    signature: String,
-    structural_hashes: Vec<u64>,
-    size: usize,
-    minhash_signature: Vec<u64>,
-    fingerprint: Option<FunctionFingerprint>,
-}
-
-impl Declaration {
-    fn to_data(&self) -> DeclarationData {
-        DeclarationData {
-            name: self.name.clone(),
-            kind: self.kind.clone(),
-            line: self.line,
-            end_line: self.end_line,
-            start_byte: self.start_byte,
-            end_byte: self.end_byte,
-            signature: self.signature.clone(),
-            structural_hashes: self.structural_hashes.clone(),
-            size: self.size,
-            minhash_signature: self.minhash_signature.clone(),
-            fingerprint: self.fingerprint.clone(),
         }
     }
 }
@@ -248,39 +215,19 @@ pub fn extract_source_range(lines: &[&str], start_line: usize, end_line: usize) 
     lines[start..end].join("\n")
 }
 
-/// Extract an exact declaration range from UTF-8 source text.
-/// Tree-sitter byte offsets are guaranteed to fall on character boundaries for
-/// nodes produced from the same source. Invalid or stale ranges fail closed.
-pub fn extract_source_bytes(source: &str, start_byte: usize, end_byte: usize) -> &str {
-    source.get(start_byte..end_byte).unwrap_or("")
-}
-
 impl StructuralDiff {
     pub fn new() -> Self {
         Self {
-            use_fingerprints: true, // Default to true for better accuracy
+            use_fingerprints: false, // Match the CLI default; fingerprints are opt-in.
         }
-    }
-
-    pub fn extract_declarations_for_inspection<'a>(
-        &self,
-        root: Node<'a>,
-        source: &str,
-    ) -> Vec<Declaration> {
-        self.extract_declarations(root, source)
     }
 
     pub fn set_use_fingerprints(&mut self, use_fingerprints: bool) {
         self.use_fingerprints = use_fingerprints;
     }
 
-    /// Format string diff for display, highlighting important changes
-    fn calculate_line_statistics(
-        &self,
-        result: &DiffResult,
-        _source1: &str,
-        _source2: &str,
-    ) -> (usize, usize, usize) {
+    /// Count declarations affected by additions, deletions, and modifications.
+    fn calculate_line_statistics(&self, result: &DiffResult) -> (usize, usize, usize) {
         let mut declarations_added = 0;
         let mut declarations_removed = 0;
         let mut declarations_modified = 0;
@@ -306,87 +253,27 @@ impl StructuralDiff {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn compare(
-        &self,
-        source1: &str,
-        source2: &str,
-        tree1: &Tree,
-        tree2: &Tree,
-        dump: Option<&std::path::Path>,
-        file1_path: &std::path::Path,
-        file2_path: &std::path::Path,
-    ) -> Result<DiffResult> {
-        use crate::dump::{AstDiffDump, DiffConfig};
-        use profiling::Timer;
-
-        // Extract declarations
-        let declarations1 = {
-            let _timer = Timer::new("extract_declarations_file1");
-            self.extract_declarations(tree1.root_node(), source1)
-        };
-
-        let declarations2 = {
-            let _timer = Timer::new("extract_declarations_file2");
-            self.extract_declarations(tree2.root_node(), source2)
-        };
-
-        // Compare declarations
-        let need_dump = dump.is_some();
-        let declarations1_clone = if need_dump {
-            Some(declarations1.clone())
-        } else {
-            None
-        };
-        let declarations2_clone = if need_dump {
-            Some(declarations2.clone())
-        } else {
-            None
-        };
-
-        let result = self.compare_declarations(declarations1, declarations2, source1, source2)?;
-
-        // Dump if requested
-        if let Some(dump_path) = dump {
-            eprintln!("Creating comprehensive dump at {}", dump_path.display());
-
-            let decls1_clone = declarations1_clone.unwrap();
-            let decls2_clone = declarations2_clone.unwrap();
-            let decls1: Vec<SerializableDeclaration> =
-                decls1_clone.iter().map(|d| d.into()).collect();
-            let decls2: Vec<SerializableDeclaration> =
-                decls2_clone.iter().map(|d| d.into()).collect();
-
-            let config = DiffConfig {
-                use_fingerprints: self.use_fingerprints,
-                parallel_matching: true,
-                threshold: 0.5,
-            };
-
-            let dump = AstDiffDump::new(
-                file1_path.to_path_buf(),
-                file2_path.to_path_buf(),
-                decls1,
-                decls2,
-                result.matched_pairs.clone(),
-                result.clone(),
-                config,
-            )?;
-
-            dump.save(dump_path)?;
-        }
-
-        Ok(result)
-    }
-
     pub fn compare_declarations(
         &self,
-        declarations1: Vec<Declaration>,
-        declarations2: Vec<Declaration>,
+        declarations1: &[Declaration],
+        declarations2: &[Declaration],
         source1: &str,
         source2: &str,
     ) -> Result<DiffResult> {
         use profiling::Timer;
+
+        for (declarations, source) in [(declarations1, source1), (declarations2, source2)] {
+            for declaration in declarations {
+                anyhow::ensure!(
+                    declaration.start_byte < declaration.end_byte
+                        && source
+                            .get(declaration.start_byte..declaration.end_byte)
+                            .is_some(),
+                    "invalid source range for declaration '{}'",
+                    declaration.name
+                );
+            }
+        }
 
         eprintln!(
             "Extracted {} declarations from file1, {} from file2",
@@ -397,7 +284,7 @@ impl StructuralDiff {
         // Match declarations — now returns rename map and pre-classified changes
         let (matches, changes, rename_map) = {
             let _timer = Timer::new("match_declarations_total");
-            self.match_declarations(&declarations1, &declarations2, source1, source2)
+            self.match_declarations(declarations1, declarations2, source1, source2)
         };
 
         let matched_declarations = matches.len();
@@ -422,10 +309,25 @@ impl StructuralDiff {
         })
     }
 
-    fn extract_declarations<'a>(&self, root: Node<'a>, source: &str) -> Vec<Declaration> {
+    pub fn extract_declarations(
+        &self,
+        tree: &tree_sitter::Tree,
+        source: &str,
+    ) -> Result<Vec<Declaration>> {
         let mut declarations = Vec::new();
+        let root = tree.root_node();
+        let bindings = alpha::Bindings::new(root, source)?;
         self.extract_declarations_recursive(root, source, &mut declarations, true);
-        declarations
+        for declaration in &mut declarations {
+            let node = root
+                .descendant_for_byte_range(declaration.start_byte, declaration.end_byte)
+                .ok_or_else(|| anyhow::anyhow!("declaration range has no syntax node"))?;
+            declaration.comparison = bindings.tokenize(node, source);
+        }
+        declarations.par_iter_mut().for_each(|declaration| {
+            declaration.minhash_signature = Self::compute_minhash(&declaration.structural_hashes);
+        });
+        Ok(declarations)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -437,13 +339,12 @@ impl StructuralDiff {
         end_line: usize,
         start_byte: usize,
         end_byte: usize,
-        node_kind: &str,
+        node_kind: &'static str,
         signature: String,
         structural_hashes: Vec<u64>,
         fingerprint: Option<FunctionFingerprint>,
     ) -> Declaration {
         let size = structural_hashes.len();
-        let minhash_signature = self.compute_minhash(&structural_hashes, MINHASH_LANES);
 
         Declaration {
             name,
@@ -452,12 +353,13 @@ impl StructuralDiff {
             end_line,
             start_byte,
             end_byte,
-            node_kind: node_kind.to_string(),
+            node_kind,
             signature,
             structural_hashes,
             size,
-            minhash_signature,
+            minhash_signature: [u64::MAX; MINHASH_LANES],
             fingerprint,
+            comparison: alpha::Tokens::default(),
         }
     }
 
@@ -524,7 +426,7 @@ impl StructuralDiff {
                     ));
                 }
             }
-            "variable_declaration" if is_global => {
+            "variable_declaration" | "lexical_declaration" if is_global => {
                 for child in node.children(&mut node.walk()) {
                     if child.kind() == "variable_declarator" {
                         if child.child_by_field_name("value").is_none() {
@@ -653,6 +555,7 @@ impl StructuralDiff {
         // both set cardinalities, so the vector has to carry each hash once.
         hashes.sort_unstable();
         hashes.dedup();
+        hashes.shrink_to_fit();
 
         hashes
     }
@@ -822,38 +725,18 @@ impl StructuralDiff {
             "export".to_string()
         }
     }
-    fn compute_minhash(&self, hashes: &[u64], num_hashes: usize) -> Vec<u64> {
-        let mut signature = vec![u64::MAX; num_hashes];
-
+    fn compute_minhash(hashes: &[u64]) -> [u64; MINHASH_LANES] {
+        let mut signature = [u64::MAX; MINHASH_LANES];
         for &hash in hashes {
-            for (i, slot) in signature.iter_mut().enumerate().take(num_hashes) {
-                let hash_value = self.hash_with_seed_u64(hash, i);
-                *slot = (*slot).min(hash_value);
+            let mut prefix = std::collections::hash_map::DefaultHasher::new();
+            hash.hash(&mut prefix);
+            for (seed, slot) in signature.iter_mut().enumerate() {
+                let mut hasher = prefix.clone();
+                seed.hash(&mut hasher);
+                *slot = (*slot).min(hasher.finish());
             }
         }
-
         signature
-    }
-
-    fn hash_with_seed_u64(&self, value: u64, seed: usize) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        let mut hasher = DefaultHasher::new();
-        value.hash(&mut hasher);
-        seed.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    pub fn calculate_declaration_similarity(
-        &self,
-        decl1: &Declaration,
-        decl2: &Declaration,
-        _source1: &str,
-        _source2: &str,
-    ) -> f64 {
-        // Delegate to the _data version via conversion
-        let d1 = decl1.to_data();
-        let d2 = decl2.to_data();
-        self.calculate_declaration_similarity_data(&d1, &d2, "", "")
     }
 
     fn is_literal(&self, node: Node) -> bool {
@@ -866,7 +749,7 @@ impl StructuralDiff {
                 | "null"
                 | "undefined"
                 | "regex"
-                | "template_string"
+                | "string_fragment"
         )
     }
 
@@ -877,14 +760,7 @@ impl StructuralDiff {
         )
     }
 
-    pub fn print_summary(
-        &self,
-        result: &DiffResult,
-        file1: &Path,
-        file2: &Path,
-        source1: &str,
-        source2: &str,
-    ) {
+    pub fn print_summary(&self, result: &DiffResult, file1: &Path, file2: &Path) {
         println!("--- {}", file1.display());
         println!("+++ {}", file2.display());
         println!("Structural similarity: {:.1}%", result.similarity * 100.0);
@@ -894,8 +770,7 @@ impl StructuralDiff {
         );
 
         // Calculate and print line statistics
-        let (lines_added, lines_removed, total_diff) =
-            self.calculate_line_statistics(result, source1, source2);
+        let (lines_added, lines_removed, total_diff) = self.calculate_line_statistics(result);
         println!(
             "Diff size: {} declarations (+{} added, -{} removed)",
             total_diff, lines_added, lines_removed
@@ -995,13 +870,15 @@ impl StructuralDiff {
     pub fn generate_normalized_display_diff(
         orig1: &str,
         orig2: &str,
-        norm1: &str,
-        norm2: &str,
+        norm1: &[String],
+        norm2: &[String],
         context_lines: usize,
     ) -> String {
         use similar::{ChangeTag, TextDiff};
 
-        let diff = TextDiff::from_lines(norm1, norm2);
+        let left = norm1.iter().map(String::as_str).collect::<Vec<_>>();
+        let right = norm2.iter().map(String::as_str).collect::<Vec<_>>();
+        let diff = TextDiff::from_slices(&left, &right);
         let orig_lines1: Vec<&str> = orig1.lines().collect();
         let orig_lines2: Vec<&str> = orig2.lines().collect();
 
@@ -1023,12 +900,12 @@ impl StructuralDiff {
                 };
                 // Look up the original (non-normalized) line at the same index
                 let orig_line = match change.tag() {
-                    ChangeTag::Delete | ChangeTag::Equal => change
+                    ChangeTag::Delete => change
                         .old_index()
                         .and_then(|i| orig_lines1.get(i))
                         .copied()
                         .unwrap_or(""),
-                    ChangeTag::Insert => change
+                    ChangeTag::Insert | ChangeTag::Equal => change
                         .new_index()
                         .and_then(|i| orig_lines2.get(i))
                         .copied()
@@ -1300,20 +1177,6 @@ impl StructuralDiff {
         desc
     }
 
-    pub fn print_side_by_side(
-        &self,
-        result: &DiffResult,
-        file1: &Path,
-        file2: &Path,
-        source1: &str,
-        source2: &str,
-    ) {
-        println!("Structural similarity: {:.1}%", result.similarity * 100.0);
-        println!();
-        // Simplified implementation
-        self.print_summary(result, file1, file2, source1, source2);
-    }
-
     pub fn print_json(&self, result: &DiffResult) -> Result<()> {
         let json = serde_json::to_string_pretty(result)?;
         println!("{}", json);
@@ -1331,7 +1194,7 @@ impl StructuralDiff {
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn match_declarations(
+    pub(crate) fn match_declarations(
         &self,
         decls1: &[Declaration],
         decls2: &[Declaration],
@@ -1342,21 +1205,10 @@ impl StructuralDiff {
         Vec<Change>,
         HashMap<String, String>,
     ) {
-        use parallel_matching_v2::ParallelMatcherV2;
+        use parallel_matching::ParallelMatcher;
         use profiling::Timer;
 
-        eprintln!(
-            "Using parallel matching v2 for {} x {} declarations",
-            decls1.len(),
-            decls2.len()
-        );
-
-        // Convert to thread-safe data structures
-        let data1: Vec<DeclarationData> = {
-            let _timer = Timer::new("convert_to_data_structures");
-            decls1.iter().map(|d| d.to_data()).collect()
-        };
-        let data2: Vec<DeclarationData> = decls2.iter().map(|d| d.to_data()).collect();
+        eprintln!("Matching {} x {} declarations", decls1.len(), decls2.len());
 
         // Build rarity scorer if using fingerprints
         let scorer = if self.use_fingerprints {
@@ -1372,209 +1224,84 @@ impl StructuralDiff {
             None
         };
 
-        let matcher = ParallelMatcherV2::new(self.use_fingerprints);
+        let matcher = ParallelMatcher::new(self.use_fingerprints);
 
-        matcher.match_declarations(
-            &data1,
-            &data2,
-            source1,
-            source2,
-            scorer.as_ref(),
-            |d1, d2, s1, s2| self.calculate_declaration_similarity_data(d1, d2, s1, s2),
-            |d1, d2, fp1, fp2, s| self.create_evidence_breakdown_data(d1, d2, fp1, fp2, s),
-        )
+        matcher.match_declarations(decls1, decls2, source1, source2, scorer.as_ref())
     }
+}
 
-    fn calculate_declaration_similarity_data(
-        &self,
-        decl1: &DeclarationData,
-        decl2: &DeclarationData,
-        _source1: &str,
-        _source2: &str,
-    ) -> f64 {
-        // For imports and exports, use signature similarity regardless of kind
-        if matches!(
-            decl1.kind,
-            DeclarationKind::Import | DeclarationKind::Export
-        ) || matches!(
-            decl2.kind,
-            DeclarationKind::Import | DeclarationKind::Export
-        ) {
-            return if decl1.signature == decl2.signature {
-                1.0
-            } else {
-                0.3
-            };
-        }
-
-        let size1 = decl1.structural_hashes.len();
-        let size2 = decl2.structural_hashes.len();
-
-        if size1 == 0 && size2 == 0 {
-            let base = if decl1.signature == decl2.signature {
-                1.0
-            } else {
-                0.5
-            };
-            return apply_kind_penalty(base, &decl1.kind, &decl2.kind);
-        }
-
-        // If one is much larger than the other, they can't be similar enough
-        let size_ratio = size1.min(size2) as f64 / size1.max(size2) as f64;
-        if size_ratio < 0.3 {
-            return 0.2;
-        }
-
-        // Jaccard similarity from structural hash intersection.
-        // Count directly instead of materializing the two sets: this runs once per
-        // surviving candidate pair (50M+ on a large bundle), and collecting sets
-        // just to read .len() off them was the single hottest allocation in the
-        // tool. |A u B| = |A| + |B| - |A n B| makes the union free.
-        let intersection =
-            sorted_intersection_count(&decl1.structural_hashes, &decl2.structural_hashes);
-        let union = size1 + size2 - intersection;
-        let base_similarity = intersection as f64 / union as f64;
-
-        apply_kind_penalty(base_similarity, &decl1.kind, &decl2.kind)
-    }
-
-    fn create_evidence_breakdown_data(
-        &self,
-        decl1: &DeclarationData,
-        decl2: &DeclarationData,
-        fp1: &FunctionFingerprint,
-        fp2: &FunctionFingerprint,
-        scorer: &RarityScorer,
-    ) -> EvidenceBreakdown {
-        let mut string_matches = Vec::new();
-        let mut constant_matches = Vec::new();
-        let mut api_matches = Vec::new();
-
-        // Match strings
-        for s1 in &fp1.strings {
-            for s2 in &fp2.strings {
-                if s1.value == s2.value {
-                    let rarity = scorer.score_string(&s1.value);
-                    let context_weight = match s1.context {
-                        StringContext::ErrorMessage => 1.2,
-                        StringContext::FilePath => 1.1,
-                        StringContext::CommandName => 1.0,
-                        StringContext::ConfigKey => 0.9,
-                        StringContext::ApiEndpoint => 1.0,
-                        StringContext::Regular => 0.7,
-                    };
-                    string_matches.push(StringMatch {
-                        value: s1.value.clone(),
-                        context: format!("{:?}", s1.context),
-                        rarity_score: rarity,
-                        contribution: rarity * context_weight,
-                    });
-                    break;
-                }
-            }
-        }
-
-        // Match constants
-        for c1 in &fp1.constants {
-            for c2 in &fp2.constants {
-                if c1.value == c2.value {
-                    let rarity = scorer.score_constant(&c1.value);
-                    constant_matches.push(ConstantMatch {
-                        value: format!("{:?}", c1.value),
-                        type_: match &c1.value {
-                            ConstantValue::Number(_) => "number",
-                            ConstantValue::Float(_) => "float",
-                            ConstantValue::Regex(_) => "regex",
-                            ConstantValue::Duration(_) => "duration",
-                        }
-                        .to_string(),
-                        rarity_score: rarity,
-                        contribution: rarity * 0.8,
-                    });
-                    break;
-                }
-            }
-        }
-
-        // Match API calls
-        for api1 in &fp1.api_calls {
-            for api2 in &fp2.api_calls {
-                if api1.object == api2.object && api1.method == api2.method {
-                    let rarity = scorer.score_api_call(api1);
-                    api_matches.push(ApiMatch {
-                        call: format!(
-                            "{}.{}",
-                            api1.object.as_deref().unwrap_or("global"),
-                            api1.method
-                        ),
-                        first_arg: api1.first_arg.clone(),
-                        rarity_score: rarity,
-                        contribution: rarity * 0.6,
-                    });
-                    break;
-                }
-            }
-        }
-
-        // Calculate unique elements
-        let unique_strings1: Vec<_> = fp1
-            .strings
-            .iter()
-            .filter(|s| !fp2.strings.iter().any(|s2| s2.value == s.value))
-            .map(|s| (s.value.clone(), format!("{:?}", s.context)))
-            .collect();
-
-        let unique_strings2: Vec<_> = fp2
-            .strings
-            .iter()
-            .filter(|s| !fp1.strings.iter().any(|s1| s1.value == s.value))
-            .map(|s| (s.value.clone(), format!("{:?}", s.context)))
-            .collect();
-
-        let unique_to_func1 = UniqueElements {
-            strings: unique_strings1,
-            constants: Vec::new(), // TODO: implement
-            api_calls: Vec::new(), // TODO: implement
-        };
-
-        let unique_to_func2 = UniqueElements {
-            strings: unique_strings2,
-            constants: Vec::new(), // TODO: implement
-            api_calls: Vec::new(), // TODO: implement
-        };
-
-        // Size analysis
-        let size_ratio = decl2.size as f64 / decl1.size as f64;
-        let interpretation = if size_ratio > 1.2 {
-            "likely enhanced"
-        } else if size_ratio < 0.8 {
-            "significantly reduced"
+pub fn declaration_similarity(decl1: &Declaration, decl2: &Declaration) -> f64 {
+    // For imports and exports, use signature similarity regardless of kind
+    if matches!(
+        decl1.kind,
+        DeclarationKind::Import | DeclarationKind::Export
+    ) || matches!(
+        decl2.kind,
+        DeclarationKind::Import | DeclarationKind::Export
+    ) {
+        return if decl1.signature == decl2.signature {
+            1.0
         } else {
-            "similar size"
-        }
-        .to_string();
+            0.3
+        };
+    }
 
-        let total_score = string_matches.iter().map(|s| s.contribution).sum::<f64>()
-            + constant_matches.iter().map(|c| c.contribution).sum::<f64>()
-            + api_matches.iter().map(|a| a.contribution).sum::<f64>();
+    let size1 = decl1.structural_hashes.len();
+    let size2 = decl2.structural_hashes.len();
 
-        let evidence_count = string_matches.len() + constant_matches.len() + api_matches.len();
+    if size1 == 0 && size2 == 0 {
+        let base = if decl1.signature == decl2.signature {
+            1.0
+        } else {
+            0.5
+        };
+        return apply_kind_penalty(base, &decl1.kind, &decl2.kind);
+    }
 
-        EvidenceBreakdown {
-            total_score,
-            evidence_count,
-            string_matches,
-            constant_matches,
-            api_matches,
-            unique_to_func1,
-            unique_to_func2,
-            size_analysis: SizeAnalysis {
-                size1: decl1.size,
-                size2: decl2.size,
-                ratio: size_ratio,
-                size_penalty: if size_ratio < 0.7 { 0.2 } else { 0.0 },
-                interpretation,
-            },
+    // If one is much larger than the other, they can't be similar enough
+    let size_ratio = size1.min(size2) as f64 / size1.max(size2) as f64;
+    if size_ratio < 0.3 {
+        return 0.2;
+    }
+
+    // Jaccard similarity from structural hash intersection.
+    // Count directly instead of materializing the two sets: this runs once per
+    // surviving candidate pair (50M+ on a large bundle), and collecting sets
+    // just to read .len() off them was the single hottest allocation in the
+    // tool. |A u B| = |A| + |B| - |A n B| makes the union free.
+    let intersection =
+        sorted_intersection_count(&decl1.structural_hashes, &decl2.structural_hashes);
+    let union = size1 + size2 - intersection;
+    let base_similarity = intersection as f64 / union as f64;
+
+    apply_kind_penalty(base_similarity, &decl1.kind, &decl2.kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minhash_prefix_reuse_preserves_all_lanes() {
+        for hashes in [
+            vec![],
+            vec![0],
+            vec![u64::MAX, 17, 500, 0],
+            (0..200).map(|n| n * 913).collect(),
+        ] {
+            let expected = std::array::from_fn(|seed: usize| {
+                hashes
+                    .iter()
+                    .map(|hash| {
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        hash.hash(&mut hasher);
+                        seed.hash(&mut hasher);
+                        hasher.finish()
+                    })
+                    .min()
+                    .unwrap_or(u64::MAX)
+            });
+            assert_eq!(StructuralDiff::compute_minhash(&hashes), expected);
         }
     }
 }

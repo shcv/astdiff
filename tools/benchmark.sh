@@ -16,7 +16,8 @@ if [[ ! -f $old_file || ! -f $new_file ]]; then
     exit 2
 fi
 cargo build --release --manifest-path "$repo_dir/Cargo.toml" --bin astdiff
-benchmark_dir=$(mktemp -d)
+mkdir -p "$repo_dir/target"
+benchmark_dir=$(mktemp -d "$repo_dir/target/benchmark.XXXXXX")
 trap 'find "$benchmark_dir" -depth -delete' EXIT
 
 printf 'run\tseconds\tmax_rss_kib\toutput_sha256\n'

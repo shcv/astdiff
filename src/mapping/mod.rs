@@ -38,27 +38,32 @@ impl MappingGenerator {
 
         // Collect all identifiers and group by (scope, original_name) to ensure uniqueness
         let mut identifier_groups: HashMap<
-            (String, String),
-            Vec<crate::canonicalizer::IdentifierInfo>,
+            (String, String, String),
+            Vec<crate::scope::IdentifierInfo>,
         > = HashMap::new();
         let canonicalizer_identifiers = self
             .canonicalizer
-            .extract_all_identifiers(tree.root_node(), &self.source);
+            .scope_analyzer
+            .resolved_identifiers(tree.root_node(), &self.source);
 
         for identifier in canonicalizer_identifiers {
-            if let Some(_canonical_name) = self
+            if let Some(canonical_name) = self
                 .canonicalizer
                 .find_canonical_name(&identifier.text, &identifier.scope_id)
             {
                 // Group by scope and original name to handle variables with same name in different scopes
-                let key = (identifier.scope_id.clone(), identifier.text.clone());
+                let key = (
+                    identifier.scope_id.clone(),
+                    identifier.text.clone(),
+                    canonical_name.to_owned(),
+                );
                 identifier_groups.entry(key).or_default().push(identifier);
             }
         }
 
         // Create entries with first and last positions
         let mut entries = Vec::new();
-        for ((scope_id, original_name), identifiers) in identifier_groups {
+        for ((scope_id, original_name, canonical_name), identifiers) in identifier_groups {
             if identifiers.is_empty() {
                 continue;
             }
@@ -72,12 +77,6 @@ impl MappingGenerator {
                 .iter()
                 .max_by_key(|id| id.node.start_byte())
                 .unwrap();
-
-            // Get the canonical name for this identifier
-            let canonical_name = self
-                .canonicalizer
-                .find_canonical_name(&original_name, &scope_id)
-                .unwrap_or_else(|| "unknown".to_string());
 
             // Determine type from canonical name prefix
             let entry_type = if canonical_name.starts_with("fn_") {
@@ -143,43 +142,8 @@ impl MappingGenerator {
     }
 
     pub fn apply_mappings(&self, tree: &Tree, mappings: HashMap<String, String>) -> Result<String> {
-        let mut output = String::new();
-        let mut last_end = 0;
-
-        let identifiers = self
-            .canonicalizer
-            .extract_all_identifiers(tree.root_node(), &self.source);
-
-        for identifier in identifiers {
-            let start = identifier.node.start_byte();
-            let end = identifier.node.end_byte();
-
-            // Skip if this identifier starts before our last position
-            if start < last_end {
-                continue;
-            }
-
-            output.push_str(&self.source[last_end..start]);
-
-            if let Some(canonical_name) = self
-                .canonicalizer
-                .find_canonical_name(&identifier.text, &identifier.scope_id)
-            {
-                if let Some(new_name) = mappings.get(&canonical_name) {
-                    output.push_str(new_name);
-                } else {
-                    output.push_str(&canonical_name);
-                }
-            } else {
-                output.push_str(&self.source[start..end]);
-            }
-
-            last_end = end;
-        }
-
-        output.push_str(&self.source[last_end..]);
-
-        Ok(output)
+        self.canonicalizer
+            .apply_names(tree, &self.source, &mappings)
     }
 }
 

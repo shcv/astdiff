@@ -1,107 +1,59 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-lazy_static::lazy_static! {
-    static ref PROFILER: Mutex<Profiler> = Mutex::new(Profiler::new());
-}
+static PROFILER: LazyLock<Mutex<HashMap<&'static str, (Duration, u32)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub struct Profiler {
-    timers: HashMap<String, Vec<Duration>>,
-    active_timers: HashMap<String, Instant>,
-}
-
-impl Profiler {
-    fn new() -> Self {
-        Self {
-            timers: HashMap::new(),
-            active_timers: HashMap::new(),
-        }
-    }
-
-    pub fn start(&mut self, name: &str) {
-        self.active_timers.insert(name.to_string(), Instant::now());
-    }
-
-    pub fn stop(&mut self, name: &str) {
-        if let Some(start) = self.active_timers.remove(name) {
-            let duration = start.elapsed();
-            self.timers
-                .entry(name.to_string())
-                .or_default()
-                .push(duration);
-        }
-    }
-
-    pub fn report(&self) {
-        if self.timers.is_empty() {
-            return;
-        }
-
-        eprintln!("\n=== Performance Profile ===");
-        let mut entries: Vec<_> = self.timers.iter().collect();
-        entries.sort_by_key(|(_, durations)| durations.iter().sum::<Duration>());
-        entries.reverse();
-
-        for (name, durations) in entries {
-            let total: Duration = durations.iter().sum();
-            let count = durations.len();
-            let avg = total / count as u32;
-            eprintln!(
-                "{:30} {:>10.3}s ({:>5} calls, avg {:>8.3}ms)",
-                name,
-                total.as_secs_f64(),
-                count,
-                avg.as_secs_f64() * 1000.0
-            );
-        }
-        eprintln!();
-    }
-}
-
-pub fn start_timer(name: &str) {
-    if std::env::var("ASTDIFF_PROFILE").is_ok() {
-        if let Ok(mut profiler) = PROFILER.lock() {
-            profiler.start(name);
-        }
-    }
-}
-
-pub fn stop_timer(name: &str) {
-    if std::env::var("ASTDIFF_PROFILE").is_ok() {
-        if let Ok(mut profiler) = PROFILER.lock() {
-            profiler.stop(name);
-        }
-    }
+fn enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ASTDIFF_PROFILE").is_some())
 }
 
 pub fn report_profile() {
-    if std::env::var("ASTDIFF_PROFILE").is_ok() {
-        if let Ok(profiler) = PROFILER.lock() {
-            profiler.report();
+    if !enabled() {
+        return;
+    }
+    let Ok(profiler) = PROFILER.lock() else {
+        return;
+    };
+    let mut entries = profiler.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(name, (total, _))| (std::cmp::Reverse(*total), **name));
+    eprintln!("\n=== Performance Profile ===");
+    for (name, (total, count)) in entries {
+        eprintln!(
+            "{:30} {:>10.3}s ({:>5} calls, avg {:>8.3}ms)",
+            name,
+            total.as_secs_f64(),
+            count,
+            (*total / *count).as_secs_f64() * 1000.0
+        );
+    }
+}
+
+/// Each timer owns its start instant, including overlapping timers with one name.
+pub struct Timer {
+    name: &'static str,
+    start: Option<Instant>,
+}
+
+impl Timer {
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            start: enabled().then(Instant::now),
         }
     }
 }
 
-pub struct Timer<'a> {
-    name: &'a str,
-    enabled: bool,
-}
-
-impl<'a> Timer<'a> {
-    pub fn new(name: &'a str) -> Self {
-        let enabled = std::env::var("ASTDIFF_PROFILE").is_ok();
-        if enabled {
-            start_timer(name);
-        }
-        Self { name, enabled }
-    }
-}
-
-impl<'a> Drop for Timer<'a> {
+impl Drop for Timer {
     fn drop(&mut self) {
-        if self.enabled {
-            stop_timer(self.name);
+        if let Some(start) = self.start {
+            if let Ok(mut profiler) = PROFILER.lock() {
+                let (total, count) = profiler.entry(self.name).or_default();
+                *total += start.elapsed();
+                *count += 1;
+            }
         }
     }
 }

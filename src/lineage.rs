@@ -5,8 +5,7 @@
 //! bound candidate sets, then scores only the surviving sparse pairs.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self};
 use std::path::Path;
 
 use anyhow::{bail, Result};
@@ -145,7 +144,7 @@ impl LineageReport {
         self.validate()?;
         let mut bytes = serde_json::to_vec_pretty(self)?;
         bytes.push(b'\n');
-        write_atomic(path, &bytes)
+        crate::atomic_file::write(path, &[&bytes])
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1268,30 +1267,6 @@ fn validate_digest(value: &str) -> Result<()> {
         bail!("expected a lowercase 256-bit hexadecimal value");
     }
     Ok(())
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("invalid lineage output file name"))?;
-    let temporary = parent.join(format!(".{name}.{}.tmp", std::process::id()));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
 }
 
 #[cfg(test)]

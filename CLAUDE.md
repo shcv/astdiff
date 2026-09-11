@@ -24,34 +24,36 @@ astdiff is an AST-based structural diff tool for JavaScript that matches renamed
 2. **Scope Analysis** (`src/scope/`) - variable scope tracking
 3. **Canonicalization** (`src/canonicalizer/`) - normalize variable names for comparison
 4. **Diff Engine** (`src/diff/`) - structural comparison and matching
-5. **Analysis IR** (`src/analysis/`) - verified positioned AST/scope/symbol graph
+5. **Analysis IR** (`src/analysis/`) - validated in-memory AST/scope/symbol graph
 6. **Lineage** (`src/lineage.rs`) - bounded structural-context symbol matching
 7. **Semantic Names** (`src/naming.rs`) - strict audited review and propagation
 
 ### Diff Matching System (src/diff/)
 
 - `mod.rs` - Main `StructuralDiff` struct, declaration extraction, similarity calculation
-- `parallel_matching_v2.rs` - Primary parallel matching algorithm using MinHash signatures
+- `parallel_matching.rs` - Primary parallel matching algorithm using MinHash signatures
 - `fingerprint.rs` - Semantic fingerprints (strings, constants, API calls) for better matching
-- `matching_report.rs` - Match-evidence data structures used by scoring
+- `alpha.rs` - Syntax comparison using resolved lexical binding identities
 - `profiling.rs` - Performance timing (enabled via `ASTDIFF_PROFILE=1`)
 
 ### Key Data Structures
 
 - `Declaration` - Extracted function/variable/class with structural hashes, MinHash signature, and optional fingerprint
-- `DeclarationData` - Thread-safe version for parallel processing
 - `DiffResult` - Final diff output with similarity score and changes
 
 ### Dump System (src/dump.rs)
 
-Serializable analysis results for faster re-runs. Uses bincode + zstd compression.
+Versioned archival/query results with integrity validation. Uses bincode + zstd compression.
 
 ### CLI (src/cli/)
 
-clap-based CLI with subcommands: diff (default), canon, analyze, analysis,
+clap-based CLI with subcommands: diff (default), canon, map,
 lineage, names (including explicit target rendering), inspect, query, and load.
 
 ## Environment Variables
 
 - `ASTDIFF_DEBUG` - Enable debug output for fingerprint extraction
 - `ASTDIFF_PROFILE` - Show performance profiling
+
+Master builds without sibling checkouts. Experimental Isoform caches and their
+schemas/CLI commands are maintained on the separate `isoform-cache` branch.

@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, Result};
 use tree_sitter::Node;
 
-use crate::scope::{ScopeAnalyzer, VariableKind};
+use crate::scope::{is_lexical_reference, ScopeAnalyzer, VariableKind};
 
 use super::{
     stable_id, AnalysisCall, AnalysisCallKind, AnalysisDefUse, AnalysisNode, AnalysisReference,
@@ -446,27 +446,6 @@ fn resolve(
         current = scope_parents.get(&scope_row).copied().flatten();
     }
     (None, AnalysisResolution::Unresolved)
-}
-
-fn is_lexical_reference(node: Node<'_>) -> bool {
-    let mut current = node;
-    while let Some(parent) = current.parent() {
-        if parent.kind() == "import_statement" {
-            return false;
-        }
-        if parent.kind() == "export_specifier" && child_field_name(parent, current) == Some("alias")
-        {
-            return false;
-        }
-        if !matches!(
-            parent.kind(),
-            "parenthesized_expression" | "export_specifier"
-        ) {
-            break;
-        }
-        current = parent;
-    }
-    true
 }
 
 fn reference_role(node: Node<'_>) -> AnalysisReferenceRole {

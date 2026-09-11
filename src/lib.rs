@@ -1,4 +1,5 @@
 pub mod analysis;
+mod atomic_file;
 pub mod canonicalizer;
 pub mod cli;
 pub mod diff;
@@ -17,10 +18,9 @@ use std::fs;
 use std::io::Read;
 
 use canonicalizer::Canonicalizer;
-pub use cli::{AnalysisQuery, Args, Mode, NameCommand, QueryType, SourceMapCommand};
+pub use cli::{Args, Mode, NameCommand, QueryType, SourceMapCommand};
 use mapping::MappingGenerator;
 use parser::JsParser;
-use pretty::PrettyPrinter;
 use scope::ScopeAnalyzer;
 
 pub fn run(args: Args) -> Result<()> {
@@ -48,11 +48,6 @@ pub fn run(args: Args) -> Result<()> {
             max_candidates,
         }),
         Mode::Names(command) => run_names(command),
-        Mode::Analyze { input_file, output } => run_analyze(&input_file, &output),
-        Mode::Analysis {
-            analysis_file,
-            query,
-        } => run_analysis_query(&analysis_file, query),
         Mode::Diff {
             file1,
             file2,
@@ -180,66 +175,6 @@ fn run_source_map(command: SourceMapCommand) -> Result<()> {
                         &inner,
                         GeneratedPosition { line, column },
                     ),
-                    include_source_names,
-                )
-            );
-        }
-        SourceMapCommand::Cache {
-            map_file,
-            generated_file,
-            output,
-            allow_sources_content,
-        } => {
-            let map = parse(&map_file, allow_sources_content)?;
-            let generated =
-                read_bounded_file(&generated_file, 512 * 1024 * 1024, "generated source")?;
-            map.write_positioned(&output, &generated)?;
-            println!(
-                "{}",
-                serde_json::json!({
-                    "cached": true,
-                    "segments": map.segment_count(),
-                    "map_digest": analysis::StableId(map.digest()).to_hex(),
-                })
-            );
-        }
-        SourceMapCommand::CacheValidate {
-            cache_file,
-            generated_file,
-        } => {
-            let generated =
-                read_bounded_file(&generated_file, 512 * 1024 * 1024, "generated source")?;
-            let mapped =
-                sourcemap::cache::MappedSourceMap::open_for_source(&cache_file, &generated)?;
-            let view = mapped.verify()?;
-            println!(
-                "{}",
-                serde_json::json!({
-                    "valid": true,
-                    "sources": view.source_count(),
-                    "names": view.name_count(),
-                    "lines": view.line_count(),
-                    "segments": view.segment_count(),
-                    "map_digest": analysis::StableId(view.raw_map_digest()).to_hex(),
-                })
-            );
-        }
-        SourceMapCommand::CacheLookup {
-            cache_file,
-            generated_file,
-            line,
-            column,
-            include_source_names,
-        } => {
-            let generated =
-                read_bounded_file(&generated_file, 512 * 1024 * 1024, "generated source")?;
-            let mapped =
-                sourcemap::cache::MappedSourceMap::open_for_source(&cache_file, &generated)?;
-            let view = mapped.verify()?;
-            println!(
-                "{}",
-                source_map_positions_json(
-                    view.lookup_all(GeneratedPosition { line, column }),
                     include_source_names,
                 )
             );
@@ -625,151 +560,6 @@ fn require_revision(actual: u64, expected: u64) -> Result<()> {
     Ok(())
 }
 
-fn run_analyze(input_file: &std::path::Path, output: &std::path::Path) -> Result<()> {
-    let source = fs::read_to_string(input_file)?;
-    let mut parser = JsParser::new()?;
-    let tree = parser.parse(&source)?;
-    let analysis = analysis::Analysis::from_javascript(&source, &tree)?;
-    analysis.write_positioned(output)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "output": output,
-            "format_version": analysis.version,
-            "profile": analysis.profile,
-            "nodes": analysis.nodes.len(),
-            "scopes": analysis.scopes.len(),
-            "symbols": analysis.symbols.len(),
-            "references": analysis.references.len(),
-            "def_uses": analysis.def_uses.len(),
-            "calls": analysis.calls.len(),
-            "losses": analysis.losses.len(),
-        }))?
-    );
-    Ok(())
-}
-
-fn run_analysis_query(path: &std::path::Path, query: AnalysisQuery) -> Result<()> {
-    let mapped = analysis::MappedAnalysis::open(path)?;
-    let view = mapped.verify()?;
-    let value = match query {
-        AnalysisQuery::Summary => serde_json::json!({
-            "profile": view.profile(),
-            "producer": view.producer(),
-            "frontend": view.frontend(),
-            "source_digest": analysis::StableId(view.source_digest()).to_hex(),
-            "source_length": view.source_length(),
-            "nodes": view.node_count(),
-            "scopes": view.scope_count(),
-            "symbols": view.symbol_count(),
-            "references": view.reference_count(),
-            "def_uses": view.def_use_count(),
-            "calls": view.call_count(),
-            "losses": view.loss_count(),
-        }),
-        AnalysisQuery::Node { index } => {
-            let node = view
-                .node(index)
-                .ok_or_else(|| anyhow::anyhow!("node index {index} is out of range"))?;
-            serde_json::json!({
-                "index": index,
-                "id": node.id.to_hex(),
-                "parent": node.parent,
-                "kind": node.kind,
-                "start_byte": node.start_byte,
-                "end_byte": node.end_byte,
-                "flags": node.flags,
-            })
-        }
-        AnalysisQuery::Scope { index } => {
-            let scope = view
-                .scope(index)
-                .ok_or_else(|| anyhow::anyhow!("scope index {index} is out of range"))?;
-            serde_json::json!({
-                "index": index,
-                "id": scope.id.to_hex(),
-                "parent": scope.parent,
-                "kind": format!("{:?}", scope.kind).to_lowercase(),
-                "depth": scope.depth,
-                "start_byte": scope.start_byte,
-                "end_byte": scope.end_byte,
-            })
-        }
-        AnalysisQuery::Symbol { index } => {
-            let symbol = view
-                .symbol(index)
-                .ok_or_else(|| anyhow::anyhow!("symbol index {index} is out of range"))?;
-            serde_json::json!({
-                "index": index,
-                "id": symbol.id.to_hex(),
-                "declaration_node": symbol.declaration_node,
-                "scope": symbol.scope,
-                "name": symbol.name,
-                "kind": format!("{:?}", symbol.kind).to_lowercase(),
-                "reference_first": symbol.reference_first,
-                "reference_count": symbol.reference_count,
-            })
-        }
-        AnalysisQuery::Reference { index } => {
-            let reference = view
-                .reference(index)
-                .ok_or_else(|| anyhow::anyhow!("reference index {index} is out of range"))?;
-            serde_json::json!({
-                "index": index,
-                "id": reference.id.to_hex(),
-                "node": reference.node,
-                "scope": reference.scope,
-                "name": reference.name,
-                "role": format!("{:?}", reference.role).to_lowercase(),
-            })
-        }
-        AnalysisQuery::DefUse { index } => {
-            let edge = view
-                .def_use(index)
-                .ok_or_else(|| anyhow::anyhow!("def-use index {index} is out of range"))?;
-            serde_json::json!({
-                "index": index,
-                "id": edge.id.to_hex(),
-                "reference": edge.reference,
-                "symbol": edge.symbol,
-                "resolution": format!("{:?}", edge.resolution).to_lowercase(),
-            })
-        }
-        AnalysisQuery::Call { index } => {
-            let call = view
-                .call(index)
-                .ok_or_else(|| anyhow::anyhow!("call index {index} is out of range"))?;
-            serde_json::json!({
-                "index": index,
-                "id": call.id.to_hex(),
-                "node": call.node,
-                "callee_reference": call.callee_reference,
-                "target_symbol": call.target_symbol,
-                "property": call.property,
-                "kind": format!("{:?}", call.kind).to_lowercase(),
-            })
-        }
-        AnalysisQuery::String { index } => serde_json::json!({
-            "index": index,
-            "value": view
-                .string(index)
-                .ok_or_else(|| anyhow::anyhow!("string index {index} is out of range"))?,
-        }),
-        AnalysisQuery::Loss { index } => {
-            let loss = view
-                .loss(index)
-                .ok_or_else(|| anyhow::anyhow!("loss index {index} is out of range"))?;
-            serde_json::json!({
-                "index": index,
-                "code": loss.code as u16,
-                "message": loss.message,
-            })
-        }
-    };
-    println!("{}", serde_json::to_string_pretty(&value)?);
-    Ok(())
-}
-
 fn run_canonicalize(
     input_file: &std::path::PathBuf,
     _preserve_comments: bool,
@@ -792,10 +582,9 @@ fn run_canonicalize(
 
     let canonical = canonicalizer.apply_canonicalization(&tree, &source)?;
     if pretty {
-        let pretty_printer = PrettyPrinter::new();
         let mut parser = JsParser::new()?;
         let canonical_tree = parser.parse(&canonical)?;
-        let formatted = pretty_printer.format(&canonical_tree, &canonical);
+        let formatted = pretty::format(&canonical_tree, &canonical)?;
         print!("{}", formatted);
     } else {
         print!("{}", canonical);
@@ -858,10 +647,9 @@ fn run_apply_mapping(
     let output = generator.apply_mappings(&tree, mappings)?;
 
     if pretty {
-        let pretty_printer = PrettyPrinter::new();
         let mut parser = JsParser::new()?;
         let output_tree = parser.parse(&output)?;
-        let formatted = pretty_printer.format(&output_tree, &output);
+        let formatted = pretty::format(&output_tree, &output)?;
         print!("{}", formatted);
     } else {
         print!("{}", output);
@@ -900,56 +688,48 @@ fn run_diff(
     use crate::diff::profiling::Timer;
     use crate::diff::StructuralDiff;
 
-    use std::thread;
-
-    // Load and parse both files in parallel
-    let file1_path = file1.clone();
-    let handle1 = thread::spawn(move || -> Result<(String, tree_sitter::Tree)> {
-        let _timer = Timer::new("read_and_parse_file1");
-        let source = fs::read_to_string(&file1_path)?;
-        let mut parser = JsParser::new()?;
-        let tree = parser.parse(&source)?;
-        Ok((source, tree))
-    });
-
-    let file2_path = file2.clone();
-    let handle2 = thread::spawn(move || -> Result<(String, tree_sitter::Tree)> {
-        let _timer = Timer::new("read_and_parse_file2");
-        let source = fs::read_to_string(&file2_path)?;
-        let mut parser = JsParser::new()?;
-        let tree = parser.parse(&source)?;
-        Ok((source, tree))
-    });
-
-    let (source1, tree1) = handle1.join().expect("Thread 1 panicked")?;
-    let (source2, tree2) = handle2.join().expect("Thread 2 panicked")?;
-
-    eprintln!(
-        "Source files: {} bytes, {} bytes",
-        source1.len(),
-        source2.len()
-    );
-
     let mut diff = StructuralDiff::new();
-
-    // Configure diff based on CLI flags
     diff.set_use_fingerprints(fingerprints);
     if verbose {
         std::env::set_var("ASTDIFF_DEBUG", "1");
     }
-
+    let extract = |path: &std::path::Path| -> Result<_> {
+        let _timer = Timer::new("read_parse_extract");
+        let source = fs::read_to_string(path)?;
+        let mut parser = JsParser::new()?;
+        let tree = parser.parse(&source)?;
+        let declarations = diff.extract_declarations(&tree, &source)?;
+        Ok((source, declarations))
+    };
+    // Workers return owned declarations. Parser trees are released before matching.
+    let (left, right) = rayon::join(|| extract(&file1), || extract(&file2));
+    let (source1, declarations1) = left?;
+    let (source2, declarations2) = right?;
     let result = {
         let _timer = Timer::new("diff_compare_total");
-        diff.compare(
-            &source1,
-            &source2,
-            &tree1,
-            &tree2,
-            dump.as_deref(),
-            &file1,
-            &file2,
-        )?
+        diff.compare_declarations(&declarations1, &declarations2, &source1, &source2)?
     };
+    let result = if let Some(path) = dump {
+        use crate::dump::{AstDiffDump, DiffConfig};
+        let dump = AstDiffDump::new(
+            file1.clone(),
+            file2.clone(),
+            declarations1.iter().map(Into::into).collect(),
+            declarations2.iter().map(Into::into).collect(),
+            result.matched_pairs.clone(),
+            result,
+            DiffConfig {
+                use_fingerprints: fingerprints,
+                parallel_matching: true,
+                threshold: 0.5,
+            },
+        )?;
+        dump.save(&path)?;
+        dump.diff_result
+    } else {
+        result
+    };
+    drop((declarations1, declarations2));
 
     {
         let _timer = Timer::new("generate_output");
@@ -958,7 +738,7 @@ fn run_diff(
                 if compact || lite {
                     diff.print_compact_locations(&result, &file1, &file2)
                 } else if summary {
-                    diff.print_summary(&result, &file1, &file2, &source1, &source2)
+                    diff.print_summary(&result, &file1, &file2)
                 } else {
                     diff.print_default(&result, &file1, &file2, &source1, &source2)?
                 }
@@ -1014,7 +794,7 @@ fn run_inspect(
     let source1 = fs::read_to_string(input_file)?;
     let mut parser = JsParser::new()?;
     let tree1 = parser.parse(&source1)?;
-    let declarations1 = diff.extract_declarations_for_inspection(tree1.root_node(), &source1);
+    let declarations1 = diff.extract_declarations(&tree1, &source1)?;
 
     // Find all declarations matching the identifier in file1
     let matches1: Vec<_> = declarations1
@@ -1037,7 +817,7 @@ fn run_inspect(
         let source2 = fs::read_to_string(file2)?;
         let mut parser = JsParser::new()?;
         let tree2 = parser.parse(&source2)?;
-        let declarations2 = diff.extract_declarations_for_inspection(tree2.root_node(), &source2);
+        let declarations2 = diff.extract_declarations(&tree2, &source2)?;
 
         // Run the matching algorithm
         let (matches, _, _) =
@@ -1071,7 +851,7 @@ fn run_inspect(
         println!("Signature: {}", decl1.signature);
 
         // Print matching information if available
-        if let Some((ref declarations2, ref match_map, ref source2)) = match_results {
+        if let Some((ref declarations2, ref match_map, _)) = match_results {
             println!("\nMatching Information:");
             if let Some(&idx2) = match_map.get(idx1) {
                 let decl2 = &declarations2[idx2];
@@ -1087,8 +867,7 @@ fn run_inspect(
                 println!("  Match similarity: calculating...");
 
                 // Calculate similarity
-                let similarity =
-                    diff.calculate_declaration_similarity(decl1, decl2, &source1, source2);
+                let similarity = crate::diff::declaration_similarity(decl1, decl2);
                 println!("  Structural similarity: {:.1}%", similarity * 100.0);
             } else {
                 println!("  NOT MATCHED - This declaration was removed or significantly changed");
