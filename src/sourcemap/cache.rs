@@ -365,7 +365,6 @@ impl SourceMap {
 
         let message = builder.build()?;
         let payload = encode_owned_positioned(
-            &state.schema,
             &state.layouts,
             &message,
             cache_budgets(
@@ -960,11 +959,11 @@ fn read_rep_u32(root: &CanonicalView<'_, '_>, field_index: usize, index: usize) 
     Ok(read_u32(bytes))
 }
 
-fn fixed_u32(value: u32) -> OwnedValue {
+fn fixed_u32(value: u32) -> OwnedValue<'static> {
     OwnedValue::Fixed(value.to_le_bytes().to_vec())
 }
 
-fn repetition_u32(values: impl IntoIterator<Item = u32>) -> OwnedValue {
+fn repetition_u32(values: impl IntoIterator<Item = u32>) -> OwnedValue<'static> {
     OwnedValue::Repetition(values.into_iter().map(fixed_u32).collect())
 }
 

@@ -502,7 +502,6 @@ impl Analysis {
 
         let message = builder.build()?;
         encode_owned_positioned(
-            &state.schema,
             &state.layouts,
             &message,
             cache_budgets(MAX_CACHE_BYTES as usize),
@@ -1685,39 +1684,39 @@ fn optional_row(value: u32) -> Option<u32> {
     (value != NO_ROW).then_some(value)
 }
 
-fn fixed_count(count: usize) -> Result<OwnedValue> {
+fn fixed_count(count: usize) -> Result<OwnedValue<'static>> {
     Ok(fixed_u32(u32::try_from(count)?))
 }
 
-fn fixed_u8(value: u8) -> OwnedValue {
+fn fixed_u8(value: u8) -> OwnedValue<'static> {
     OwnedValue::Fixed(vec![value])
 }
 
-fn fixed_u16(value: u16) -> OwnedValue {
+fn fixed_u16(value: u16) -> OwnedValue<'static> {
     OwnedValue::Fixed(value.to_le_bytes().to_vec())
 }
 
-fn fixed_u32(value: u32) -> OwnedValue {
+fn fixed_u32(value: u32) -> OwnedValue<'static> {
     OwnedValue::Fixed(value.to_le_bytes().to_vec())
 }
 
-fn fixed_u64(value: u64) -> OwnedValue {
+fn fixed_u64(value: u64) -> OwnedValue<'static> {
     OwnedValue::Fixed(value.to_le_bytes().to_vec())
 }
 
-fn repetition_u8(values: impl Iterator<Item = u8>) -> OwnedValue {
+fn repetition_u8(values: impl Iterator<Item = u8>) -> OwnedValue<'static> {
     OwnedValue::Repetition(values.map(fixed_u8).collect())
 }
 
-fn repetition_u16(values: impl Iterator<Item = u16>) -> OwnedValue {
+fn repetition_u16(values: impl Iterator<Item = u16>) -> OwnedValue<'static> {
     OwnedValue::Repetition(values.map(fixed_u16).collect())
 }
 
-fn repetition_u32(values: impl Iterator<Item = u32>) -> OwnedValue {
+fn repetition_u32(values: impl Iterator<Item = u32>) -> OwnedValue<'static> {
     OwnedValue::Repetition(values.map(fixed_u32).collect())
 }
 
-fn repetition_u32_from_u64(values: impl Iterator<Item = u64>) -> Result<OwnedValue> {
+fn repetition_u32_from_u64(values: impl Iterator<Item = u64>) -> Result<OwnedValue<'static>> {
     Ok(OwnedValue::Repetition(
         values
             .map(|value| Ok(fixed_u32(u32::try_from(value)?)))
